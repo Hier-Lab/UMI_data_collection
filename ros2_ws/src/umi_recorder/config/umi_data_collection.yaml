@@ -37,6 +37,9 @@ umi_recorder_node:
     depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
     pose_topic: "/mocap/UMI_HandRight/pose"
 
+    # --- Depth visualization ---
+    max_depth_m: 0.5   # depth values beyond this (meters) are clipped when colorizing the depth panel
+
     # --- Output ---
     output_dir: "/home/hier-tony/umi_episodes"   # where recorded ROS 2 bags (one per episode) are saved
 

@@ -29,6 +29,7 @@ class RecorderNode(Node):
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("pose_topic", "/mocap/umi_gripper/pose")
+        self.declare_parameter("max_depth_m", 0.5)
         self.declare_parameter("output_dir", str(Path.home() / "umi_episodes"))
         self.declare_parameter("web_host", "0.0.0.0")
         self.declare_parameter("web_port", 8080)
@@ -36,12 +37,14 @@ class RecorderNode(Node):
         color_topic = self.get_parameter("color_topic").value
         depth_topic = self.get_parameter("depth_topic").value
         pose_topic = self.get_parameter("pose_topic").value
+        self._max_depth_m = float(self.get_parameter("max_depth_m").value)
         output_dir = Path(self.get_parameter("output_dir").value)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest_color_jpeg: bytes | None = None
+        self._latest_depth_jpeg: bytes | None = None
         self._trajectory: list[dict] = []
         self._recording = False
         self._bag = EpisodeBagWriter(output_dir)
@@ -87,6 +90,17 @@ class RecorderNode(Node):
             self._bag.write(self._color_topic, msg, self.get_clock().now().nanoseconds)
 
     def _on_depth(self, msg: Image) -> None:
+        depth_mm = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        max_depth_mm = self._max_depth_m * 1000.0
+        normalized = np.clip(depth_mm.astype(np.float32), 0, max_depth_mm) / max_depth_mm
+        gray = (255 - (normalized * 255)).astype(np.uint8)  # near = bright, far/clipped = dark
+        colorized = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+        colorized[depth_mm == 0] = 0  # no-return pixels stay black instead of "far"
+        ok, jpeg = cv2.imencode(".jpg", colorized, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ok:
+            with self._lock:
+                self._latest_depth_jpeg = jpeg.tobytes()
+
         if self._recording:
             self._bag.register_topic(self._depth_topic, "sensor_msgs/msg/Image")
             self._bag.write(self._depth_topic, msg, self.get_clock().now().nanoseconds)
@@ -141,7 +155,14 @@ class RecorderNode(Node):
         @app.route("/video_feed")
         def video_feed():
             return Response(
-                self._mjpeg_generator(),
+                self._mjpeg_generator("color"),
+                mimetype="multipart/x-mixed-replace; boundary=frame",
+            )
+
+        @app.route("/depth_feed")
+        def depth_feed():
+            return Response(
+                self._mjpeg_generator("depth"),
                 mimetype="multipart/x-mixed-replace; boundary=frame",
             )
 
@@ -149,6 +170,10 @@ class RecorderNode(Node):
         def trajectory():
             with self._lock:
                 return jsonify(self._trajectory[-MAX_TRAJECTORY_POINTS:])
+
+        @app.route("/config")
+        def config():
+            return jsonify({"max_depth_m": self._max_depth_m})
 
         @app.route("/status")
         def status():
@@ -171,12 +196,13 @@ class RecorderNode(Node):
 
         return app
 
-    def _mjpeg_generator(self):
+    def _mjpeg_generator(self, stream: str):
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
         _, blank_jpeg = cv2.imencode(".jpg", blank)
         while rclpy.ok():
             with self._lock:
-                frame = self._latest_color_jpeg or blank_jpeg.tobytes()
+                latest = self._latest_color_jpeg if stream == "color" else self._latest_depth_jpeg
+                frame = latest or blank_jpeg.tobytes()
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
             threading.Event().wait(1 / 30)
 

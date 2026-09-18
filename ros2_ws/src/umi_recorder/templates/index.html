@@ -3,28 +3,39 @@
 <head>
   <meta charset="utf-8">
   <title>UMI Data Collection</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <style>
     body { font-family: sans-serif; background: #1e1e1e; color: #eee; margin: 0; padding: 20px; }
     h1 { font-size: 1.2rem; }
     .row { display: flex; gap: 20px; flex-wrap: wrap; }
     .panel { background: #2a2a2a; border-radius: 8px; padding: 12px; }
-    img#video { width: 640px; height: 480px; background: #000; border-radius: 6px; }
-    canvas#traj { background: #111; border-radius: 6px; }
+    .panel h2 { font-size: 0.85rem; margin: 0 0 8px; color: #aaa; font-weight: normal; text-transform: uppercase; letter-spacing: 0.05em; }
+    img.video { width: 424px; height: 318px; background: #000; border-radius: 6px; display: block; }
+    #traj3d { width: 480px; height: 480px; border-radius: 6px; overflow: hidden; }
     button { font-size: 1rem; padding: 10px 20px; margin-right: 10px; border: none; border-radius: 6px; cursor: pointer; }
     #recordBtn { background: #d33; color: white; }
     #stopBtn { background: #555; color: white; }
     #status { margin-top: 10px; font-family: monospace; }
     .recording #recordBtn { opacity: 0.4; }
+    .video-stack { display: flex; flex-direction: column; gap: 12px; }
   </style>
 </head>
 <body>
   <h1>UMI Gripper Data Collection</h1>
   <div class="row">
-    <div class="panel">
-      <img id="video" src="/video_feed">
+    <div class="panel video-stack">
+      <div>
+        <h2>Color</h2>
+        <img class="video" id="video" src="/video_feed">
+      </div>
+      <div>
+        <h2>Depth (0&ndash;<span id="maxDepthLabel">?</span> m)</h2>
+        <img class="video" id="depth" src="/depth_feed">
+      </div>
     </div>
     <div class="panel">
-      <canvas id="traj" width="480" height="480"></canvas>
+      <h2>Trajectory (last 20 poses)</h2>
+      <div id="traj3d"></div>
     </div>
   </div>
   <div class="panel" style="margin-top: 20px;">
@@ -35,8 +46,6 @@
 
   <script>
     const statusEl = document.getElementById('status');
-    const canvas = document.getElementById('traj');
-    const ctx = canvas.getContext('2d');
 
     async function startRecord() {
       const res = await fetch('/record', { method: 'POST' });
@@ -62,48 +71,100 @@
       updateStatus(await res.json());
     }
 
-    function drawTrajectory(points) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      if (points.length === 0) return;
-
-      // Project x/y onto canvas, auto-scaled to the visible range.
-      const xs = points.map(p => p.x);
-      const ys = points.map(p => p.y);
-      const minX = Math.min(...xs), maxX = Math.max(...xs);
-      const minY = Math.min(...ys), maxY = Math.max(...ys);
-      const rangeX = Math.max(maxX - minX, 0.01);
-      const rangeY = Math.max(maxY - minY, 0.01);
-      const pad = 20;
-
-      ctx.strokeStyle = '#4caf50';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      points.forEach((p, i) => {
-        const cx = pad + ((p.x - minX) / rangeX) * (canvas.width - 2 * pad);
-        const cy = canvas.height - (pad + ((p.y - minY) / rangeY) * (canvas.height - 2 * pad));
-        if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
-      });
-      ctx.stroke();
-
-      const last = points[points.length - 1];
-      const lx = pad + ((last.x - minX) / rangeX) * (canvas.width - 2 * pad);
-      const ly = canvas.height - (pad + ((last.y - minY) / rangeY) * (canvas.height - 2 * pad));
-      ctx.fillStyle = '#f44336';
-      ctx.beginPath();
-      ctx.arc(lx, ly, 5, 0, 2 * Math.PI);
-      ctx.fill();
+    async function pollMaxDepth() {
+      try {
+        const res = await fetch('/config');
+        const cfg = await res.json();
+        document.getElementById('maxDepthLabel').textContent = cfg.max_depth_m.toFixed(2);
+      } catch (e) { /* config endpoint optional */ }
     }
+
+    // -- 3D trajectory view (rviz-like: grid, axes, orbit camera) --------
+
+    const container = document.getElementById('traj3d');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
+
+    const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.01, 100);
+    camera.up.set(0, 0, 1); // z-up, matches mocap convention
+    camera.position.set(0.6, -0.6, 0.6);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    container.appendChild(renderer.domElement);
+
+    scene.add(new THREE.GridHelper(2, 20, 0x444444, 0x333333).rotateX(Math.PI / 2));
+    scene.add(new THREE.AxesHelper(0.3));
+
+    const trajGeometry = new THREE.BufferGeometry();
+    const trajMaterial = new THREE.LineBasicMaterial({ color: 0x4caf50, linewidth: 2 });
+    const trajLine = new THREE.Line(trajGeometry, trajMaterial);
+    scene.add(trajLine);
+
+    const currentPosGeometry = new THREE.SphereGeometry(0.012, 16, 16);
+    const currentPosMaterial = new THREE.MeshBasicMaterial({ color: 0xf44336 });
+    const currentPosMarker = new THREE.Mesh(currentPosGeometry, currentPosMaterial);
+    scene.add(currentPosMarker);
+
+    // Simple orbit controls (drag to rotate, wheel to zoom) without extra script deps.
+    let isDragging = false, lastX = 0, lastY = 0;
+    let azimuth = Math.PI / 4, elevation = Math.PI / 6, radius = 1.0;
+    const target = new THREE.Vector3(0, 0, 0);
+
+    function updateCameraFromOrbit() {
+      const x = target.x + radius * Math.cos(elevation) * Math.cos(azimuth);
+      const y = target.y + radius * Math.cos(elevation) * Math.sin(azimuth);
+      const z = target.z + radius * Math.sin(elevation);
+      camera.position.set(x, y, z);
+      camera.lookAt(target);
+    }
+    updateCameraFromOrbit();
+
+    renderer.domElement.addEventListener('mousedown', (e) => { isDragging = true; lastX = e.clientX; lastY = e.clientY; });
+    window.addEventListener('mouseup', () => { isDragging = false; });
+    window.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      azimuth -= dx * 0.008;
+      elevation = Math.max(-1.4, Math.min(1.4, elevation + dy * 0.008));
+      updateCameraFromOrbit();
+    });
+    renderer.domElement.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      radius = Math.max(0.1, Math.min(5, radius * (1 + e.deltaY * 0.001)));
+      updateCameraFromOrbit();
+    }, { passive: false });
+
+    function updateTrajectory(points) {
+      if (points.length === 0) {
+        trajGeometry.setFromPoints([]);
+        currentPosMarker.visible = false;
+        return;
+      }
+      const vecs = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
+      trajGeometry.setFromPoints(vecs);
+      const last = vecs[vecs.length - 1];
+      currentPosMarker.position.copy(last);
+      currentPosMarker.visible = true;
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    }
+    animate();
 
     async function pollTrajectory() {
       const res = await fetch('/trajectory');
-      drawTrajectory(await res.json());
+      updateTrajectory(await res.json());
     }
 
     setInterval(pollStatus, 1000);
     setInterval(pollTrajectory, 100);
     pollStatus();
+    pollMaxDepth();
   </script>
 </body>
 </html>
