@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from flask import Flask, Response, jsonify, render_template
 from geometry_msgs.msg import PoseStamped
@@ -129,7 +130,8 @@ class RecorderNode(Node):
     # -- Flask app -----------------------------------------------------------
 
     def _build_flask_app(self) -> Flask:
-        app = Flask(__name__)
+        template_folder = Path(get_package_share_directory("umi_recorder")) / "templates"
+        app = Flask(__name__, template_folder=str(template_folder))
 
         @app.route("/")
         def index():
