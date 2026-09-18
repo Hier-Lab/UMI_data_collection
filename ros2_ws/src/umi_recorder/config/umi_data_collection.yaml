@@ -31,10 +31,19 @@ mocap_bridge_node:
 
 umi_recorder_node:
   ros__parameters:
+    # --- RealSense camera ---
+    # Captured directly via pyrealsense2 (not through the realsense2_camera
+    # ROS node). Depth is aligned to color; no point cloud is computed.
+    camera_width: 640
+    camera_height: 480
+    camera_fps: 30
+
     # --- Input topics ---
+    # color_topic/depth_topic only name the topics written into the recorded
+    # bag (there's no live ROS Image publisher to subscribe to anymore).
     # pose_topic must match "/mocap/<rigid_body_names[i]>/pose" from mocap_bridge_node above.
-    color_topic: "/camera/camera/color/image_raw"
-    depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
+    color_topic: "/camera/color/image_raw"
+    depth_topic: "/camera/aligned_depth_to_color/image_raw"
     pose_topic: "/mocap/UMI_HandRight/pose"
 
     # --- Depth visualization ---

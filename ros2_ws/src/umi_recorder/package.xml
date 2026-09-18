@@ -14,6 +14,8 @@
   <depend>cv_bridge</depend>
   <depend>rosbag2_py</depend>
   <depend>python3-flask</depend>
+  <!-- pyrealsense2 is not resolvable via rosdep/apt on this platform;
+       install manually: pip3 install pyrealsense2 (see README/CLAUDE.md) -->
 
   <export>
     <build_type>ament_python</build_type>

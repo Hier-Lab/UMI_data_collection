@@ -1,5 +1,12 @@
 """ROS 2 node that records synchronized RealSense RGB-D + mocap trajectory
-demonstrations into a ROS 2 bag, controlled by a Flask web UI."""
+demonstrations into a ROS 2 bag, controlled by a Flask web UI.
+
+Color/depth frames are pulled directly from the camera via pyrealsense2
+(bypassing the realsense2_camera ROS node), since that ROS wrapper was
+measured to degrade from ~30fps to ~5-8fps within seconds under this
+node's config, while the raw SDK sustains a steady 30fps. Depth is
+aligned to color; no point cloud is computed or published.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pyrealsense2 as rs
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
@@ -29,18 +37,24 @@ class RecorderNode(Node):
     def __init__(self):
         super().__init__("umi_recorder_node")
 
-        self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
-        self.declare_parameter("depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
+        self.declare_parameter("color_topic", "/camera/color/image_raw")
+        self.declare_parameter("depth_topic", "/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("pose_topic", "/mocap/umi_gripper/pose")
+        self.declare_parameter("camera_width", 640)
+        self.declare_parameter("camera_height", 480)
+        self.declare_parameter("camera_fps", 30)
         self.declare_parameter("max_depth_m", 0.5)
         self.declare_parameter("output_dir", str(Path.home() / "umi_episodes"))
         self.declare_parameter("web_host", "0.0.0.0")
         self.declare_parameter("web_port", 8080)
 
-        color_topic = self.get_parameter("color_topic").value
-        depth_topic = self.get_parameter("depth_topic").value
-        pose_topic = self.get_parameter("pose_topic").value
+        self._color_topic = self.get_parameter("color_topic").value
+        self._depth_topic = self.get_parameter("depth_topic").value
+        pose_topic = self._pose_topic = self.get_parameter("pose_topic").value
         self._max_depth_m = float(self.get_parameter("max_depth_m").value)
+        width = int(self.get_parameter("camera_width").value)
+        height = int(self.get_parameter("camera_height").value)
+        fps = int(self.get_parameter("camera_fps").value)
         output_dir = Path(self.get_parameter("output_dir").value)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -55,22 +69,16 @@ class RecorderNode(Node):
         self._bag = EpisodeBagWriter(output_dir)
         self._current_bag_path: Path | None = None
 
-        self._color_topic = color_topic
-        self._depth_topic = depth_topic
-        self._pose_topic = pose_topic
-
-        color_group = MutuallyExclusiveCallbackGroup()
-        depth_group = MutuallyExclusiveCallbackGroup()
         pose_group = MutuallyExclusiveCallbackGroup()
-        self.create_subscription(
-            Image, color_topic, self._on_color, qos_profile_sensor_data, callback_group=color_group
-        )
-        self.create_subscription(
-            Image, depth_topic, self._on_depth, qos_profile_sensor_data, callback_group=depth_group
-        )
         self.create_subscription(
             PoseStamped, pose_topic, self._on_pose, qos_profile_sensor_data, callback_group=pose_group
         )
+
+        self._camera_stop = threading.Event()
+        self._camera_thread = threading.Thread(
+            target=self._camera_loop, args=(width, height, fps), daemon=True
+        )
+        self._camera_thread.start()
 
         self._app = self._build_flask_app()
         self._web_thread = threading.Thread(
@@ -90,22 +98,50 @@ class RecorderNode(Node):
             f"{self.get_parameter('web_port').value}  episodes -> {output_dir}"
         )
 
-    # -- ROS callbacks -----------------------------------------------------
+    # -- Camera capture (pyrealsense2, direct SDK access) -------------------
 
-    def _on_color(self, msg: Image) -> None:
-        frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    def _camera_loop(self, width: int, height: int, fps: int) -> None:
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
+        align = rs.align(rs.stream.color)
+
+        pipeline.start(config)
+        self.get_logger().info(f"pyrealsense2 pipeline started ({width}x{height}@{fps})")
+        try:
+            while not self._camera_stop.is_set() and rclpy.ok():
+                frames = pipeline.wait_for_frames(timeout_ms=1000)
+                frames = align.process(frames)
+                color_frame = frames.get_color_frame()
+                depth_frame = frames.get_depth_frame()
+                if not color_frame or not depth_frame:
+                    continue
+
+                color = np.asanyarray(color_frame.get_data())
+                depth_mm = np.asanyarray(depth_frame.get_data())
+                stamp = self.get_clock().now()
+                self._handle_color(color, stamp)
+                self._handle_depth(depth_mm, stamp)
+        except Exception:
+            self.get_logger().exception("pyrealsense2 capture loop stopped")
+        finally:
+            pipeline.stop()
+
+    def _handle_color(self, color_bgr: np.ndarray, stamp) -> None:
+        ok, jpeg = cv2.imencode(".jpg", color_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         if ok:
             with self._color_ready:
                 self._latest_color_jpeg = jpeg.tobytes()
                 self._color_ready.notify_all()
 
         if self._recording:
+            msg = self._bridge.cv2_to_imgmsg(color_bgr, encoding="bgr8")
+            msg.header.stamp = stamp.to_msg()
             self._bag.register_topic(self._color_topic, "sensor_msgs/msg/Image")
-            self._bag.write(self._color_topic, msg, self.get_clock().now().nanoseconds)
+            self._bag.write(self._color_topic, msg, stamp.nanoseconds)
 
-    def _on_depth(self, msg: Image) -> None:
-        depth_mm = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+    def _handle_depth(self, depth_mm: np.ndarray, stamp) -> None:
         max_depth_mm = self._max_depth_m * 1000.0
         normalized = np.clip(depth_mm.astype(np.float32), 0, max_depth_mm) / max_depth_mm
         gray = (255 - (normalized * 255)).astype(np.uint8)  # near = bright, far/clipped = dark
@@ -118,8 +154,12 @@ class RecorderNode(Node):
                 self._depth_ready.notify_all()
 
         if self._recording:
+            msg = self._bridge.cv2_to_imgmsg(depth_mm, encoding="16UC1")
+            msg.header.stamp = stamp.to_msg()
             self._bag.register_topic(self._depth_topic, "sensor_msgs/msg/Image")
-            self._bag.write(self._depth_topic, msg, self.get_clock().now().nanoseconds)
+            self._bag.write(self._depth_topic, msg, stamp.nanoseconds)
+
+    # -- ROS callbacks -------------------------------------------------------
 
     def _on_pose(self, msg: PoseStamped) -> None:
         point = {
@@ -157,6 +197,11 @@ class RecorderNode(Node):
         self.get_logger().info(f"Recording stopped -> {path}")
         self._current_bag_path = None
         return str(path) if path else None
+
+    def destroy_node(self) -> bool:
+        self._camera_stop.set()
+        self._camera_thread.join(timeout=2.0)
+        return super().destroy_node()
 
     # -- Flask app -----------------------------------------------------------
 

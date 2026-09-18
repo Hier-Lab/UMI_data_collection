@@ -1,7 +1,6 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -15,16 +14,10 @@ def generate_launch_description():
         "tracked rigid bodies, topics, recording output, web UI host/port)",
     )
 
-    realsense_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            [get_package_share_directory("realsense2_camera"), "/launch/rs_launch.py"]
-        ),
-        launch_arguments={
-            "rgb_camera.color_profile": "640x480x30",
-            "depth_module.depth_profile": "640x480x30",
-            "align_depth.enable": "true",
-        }.items(),
-    )
+    # RealSense color/depth are captured directly via pyrealsense2 inside
+    # umi_recorder_node (see recorder_node.py) rather than through the
+    # realsense2_camera ROS node, which was measured to degrade from ~30fps
+    # to ~5-8fps within seconds under this workload.
 
     mocap_bridge_node = Node(
         package="mocap_bridge",
@@ -45,7 +38,6 @@ def generate_launch_description():
     return LaunchDescription(
         [
             config_arg,
-            realsense_launch,
             mocap_bridge_node,
             recorder_node,
         ]
