@@ -62,15 +62,15 @@
       updateStatus(await res.json());
     }
 
-    let maxDepthM = null;
+    let cameraConfig = {};  // { [name]: { max_depth_m } }
 
-    async function pollMaxDepth() {
+    async function pollConfig() {
       try {
         const res = await fetch('/config');
-        const cfg = await res.json();
-        maxDepthM = cfg.max_depth_m;
-        document.querySelectorAll('.maxDepthLabel').forEach(el => {
-          el.textContent = maxDepthM.toFixed(2);
+        cameraConfig = await res.json();
+        Object.entries(cameraConfig).forEach(([name, cfg]) => {
+          const el = document.querySelector(`.maxDepthLabel[data-camera="${name}"]`);
+          if (el) el.textContent = cfg.max_depth_m.toFixed(2);
         });
       } catch (e) { /* config endpoint optional */ }
     }
@@ -79,7 +79,9 @@
       const res = await fetch('/cameras');
       const names = await res.json();
       const container = document.getElementById('cameraPanels');
-      container.innerHTML = names.map(name => `
+      container.innerHTML = names.map(name => {
+        const maxDepthM = cameraConfig[name]?.max_depth_m;
+        return `
         <div class="panel video-stack">
           <h2>${name}</h2>
           <div>
@@ -87,16 +89,12 @@
             <img class="video" src="/video_feed/${name}">
           </div>
           <div>
-            <h2>Depth (0&ndash;<span class="maxDepthLabel">?</span> m)</h2>
+            <h2>Depth (0&ndash;<span class="maxDepthLabel" data-camera="${name}">${maxDepthM !== undefined ? maxDepthM.toFixed(2) : '?'}</span> m)</h2>
             <img class="video" src="/depth_feed/${name}">
           </div>
         </div>
-      `).join('');
-      if (maxDepthM !== null) {
-        document.querySelectorAll('.maxDepthLabel').forEach(el => {
-          el.textContent = maxDepthM.toFixed(2);
-        });
-      }
+      `;
+      }).join('');
     }
 
     // -- 3D trajectory view (rviz-like: grid, axes, orbit camera) --------
@@ -222,8 +220,7 @@
     setInterval(pollStatus, 1000);
     setInterval(pollTrajectory, 100);
     pollStatus();
-    pollMaxDepth();
-    loadCameraPanels();
+    pollConfig().then(loadCameraPanels);
   </script>
 </body>
 </html>

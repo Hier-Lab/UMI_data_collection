@@ -34,30 +34,38 @@ umi_recorder_node:
     # --- RealSense camera(s) ---
     # Captured directly via pyrealsense2 (not through the realsense2_camera
     # ROS node). Depth is aligned to color; no point cloud is computed.
-    # camera_names and camera_serials are matched by position (index 0 <-> index 0, ...),
+    # All camera_* lists below are matched by position (index 0 <-> index 0, ...),
     # same convention as mocap_bridge_node's rigid_body_ids/rigid_body_names above.
     # Up to 4 cameras. Find each camera's serial with:
-    #   ros2 run realsense2_camera rs-enumerate-devices   (or `rs-enumerate-devices` if installed standalone)
-    # To record with a single camera, leave one entry in each list, e.g.:
+    #   rs-enumerate-devices   (from librealsense2-utils, or /opt/ros/humble/bin/rs-enumerate-devices)
+    #
+    # Single camera example:
     #   camera_names: ["camera_0"]
     #   camera_serials: ["135422077356"]
-    # To record with multiple cameras (up to 4), add matching entries, e.g.:
-    #   camera_names: ["front", "wrist", "side"]
-    #   camera_serials: ["135422077356", "827312071475", "923322071188"]
+    #   camera_widths: [640]
+    #   camera_heights: [480]
+    #   camera_fps: [30]
+    #   camera_max_depth_m: [0.5]
+    #
+    # Mixed D405 (close-range wrist cam) + D435i (wider scene cam) example:
+    #   camera_names: ["wrist", "scene"]
+    #   camera_serials: ["260422272872", "335222074368"]
+    #   camera_widths: [640, 640]
+    #   camera_heights: [480, 480]
+    #   camera_fps: [30, 30]
+    #   camera_max_depth_m: [0.5, 2.0]   # D405's usable range is much shorter than D435i's
     camera_names: ["camera_0"]
     camera_serials: ["335222074368"]
-    camera_width: 640
-    camera_height: 480
-    camera_fps: 30
+    camera_widths: [640]
+    camera_heights: [480]
+    camera_fps: [30]
+    camera_max_depth_m: [0.5]   # per camera: depth values beyond this (meters) are clipped when colorizing that camera's depth panel
 
     # --- Input topics ---
     # pose_topic must match "/mocap/<rigid_body_names[i]>/pose" from mocap_bridge_node above.
     # (Each camera's own color/depth topics are derived from camera_names above,
     # e.g. "front" -> /front/color/image_raw, /front/aligned_depth_to_color/image_raw.)
     pose_topic: "/mocap/UMI_HandRight/pose"
-
-    # --- Depth visualization ---
-    max_depth_m: 0.5   # depth values beyond this (meters) are clipped when colorizing the depth panel
 
     # --- Output ---
     output_dir: "/home/hier-tony/umi_episodes"   # where recorded ROS 2 bags (one per episode) are saved

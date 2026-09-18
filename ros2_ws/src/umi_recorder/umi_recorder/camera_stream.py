@@ -35,7 +35,7 @@ class CameraStream:
         self._width = width
         self._height = height
         self._fps = fps
-        self._max_depth_m = max_depth_m
+        self.max_depth_m = max_depth_m
         self._bridge = bridge
         self._bag = bag
         self._logger = logger
@@ -91,10 +91,15 @@ class CameraStream:
         config.enable_stream(rs.stream.depth, self._width, self._height, rs.format.z16, self._fps)
         align = rs.align(rs.stream.color)
 
-        pipeline.start(config)
+        profile = pipeline.start(config)
+        # Depth scale (meters per raw depth unit) varies by camera model - e.g.
+        # ~0.001 (1mm/unit) on a D435i vs ~0.0001 (0.1mm/unit) on a D405.
+        # Treating raw units as millimeters unconditionally silently produced
+        # a 10x-wrong depth reading on the D405 (everything looked "far").
+        depth_scale_m = profile.get_device().first_depth_sensor().get_depth_scale()
         self._logger.info(
             f"[{self.name}] pyrealsense2 pipeline started ({self._width}x{self._height}"
-            f"@{self._fps}, serial={self.serial})"
+            f"@{self._fps}, serial={self.serial}, depth_scale={depth_scale_m}m/unit)"
         )
         try:
             while not self._stop.is_set() and rclpy.ok():
@@ -106,7 +111,10 @@ class CameraStream:
                     continue
 
                 color = np.asanyarray(color_frame.get_data())
-                depth_mm = np.asanyarray(depth_frame.get_data())
+                depth_raw = np.asanyarray(depth_frame.get_data())
+                # Normalize to millimeters regardless of camera model, so
+                # colorization and recorded bags are consistent across cameras.
+                depth_mm = (depth_raw.astype(np.float32) * depth_scale_m * 1000.0).astype(np.uint16)
                 stamp = self._clock.now()
                 self._handle_color(color, stamp)
                 self._handle_depth(depth_mm, stamp)
@@ -129,7 +137,7 @@ class CameraStream:
             self._bag.write(self.color_topic, msg, stamp.nanoseconds)
 
     def _handle_depth(self, depth_mm: np.ndarray, stamp) -> None:
-        max_depth_mm = self._max_depth_m * 1000.0
+        max_depth_mm = self.max_depth_m * 1000.0
         normalized = np.clip(depth_mm.astype(np.float32), 0, max_depth_mm) / max_depth_mm
         gray = (255 - (normalized * 255)).astype(np.uint8)  # near = bright, far/clipped = dark
         colorized = cv2.applyColorMap(gray, cv2.COLORMAP_JET)

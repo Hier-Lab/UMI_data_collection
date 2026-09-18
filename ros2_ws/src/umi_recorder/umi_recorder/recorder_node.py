@@ -40,33 +40,42 @@ class RecorderNode(Node):
 
         self.declare_parameter("camera_names", ["camera_0"])
         self.declare_parameter("camera_serials", [""])
-        self.declare_parameter("camera_width", 640)
-        self.declare_parameter("camera_height", 480)
-        self.declare_parameter("camera_fps", 30)
+        self.declare_parameter("camera_widths", [640])
+        self.declare_parameter("camera_heights", [480])
+        self.declare_parameter("camera_fps", [30])
+        self.declare_parameter("camera_max_depth_m", [0.5])
         self.declare_parameter("pose_topic", "/mocap/umi_gripper/pose")
-        self.declare_parameter("max_depth_m", 0.5)
         self.declare_parameter("output_dir", str(Path.home() / "umi_episodes"))
         self.declare_parameter("web_host", "0.0.0.0")
         self.declare_parameter("web_port", 8080)
 
         camera_names = list(self.get_parameter("camera_names").value)
         camera_serials = list(self.get_parameter("camera_serials").value)
+        camera_widths = list(self.get_parameter("camera_widths").value)
+        camera_heights = list(self.get_parameter("camera_heights").value)
+        camera_fps_list = list(self.get_parameter("camera_fps").value)
+        camera_max_depths = list(self.get_parameter("camera_max_depth_m").value)
+
         if len(camera_names) > MAX_CAMERAS:
             raise ValueError(
                 f"Configured {len(camera_names)} cameras (camera_names), but at most "
                 f"{MAX_CAMERAS} are supported."
             )
-        if len(camera_serials) != len(camera_names):
-            raise ValueError(
-                "camera_names and camera_serials must have the same length "
-                f"(got {len(camera_names)} names, {len(camera_serials)} serials)."
-            )
+        per_camera_lists = {
+            "camera_serials": camera_serials,
+            "camera_widths": camera_widths,
+            "camera_heights": camera_heights,
+            "camera_fps": camera_fps_list,
+            "camera_max_depth_m": camera_max_depths,
+        }
+        for param_name, values in per_camera_lists.items():
+            if len(values) != len(camera_names):
+                raise ValueError(
+                    f"camera_names and {param_name} must have the same length "
+                    f"(got {len(camera_names)} names, {len(values)} entries in {param_name})."
+                )
 
-        width = int(self.get_parameter("camera_width").value)
-        height = int(self.get_parameter("camera_height").value)
-        fps = int(self.get_parameter("camera_fps").value)
         pose_topic = self._pose_topic = self.get_parameter("pose_topic").value
-        self._max_depth_m = float(self.get_parameter("max_depth_m").value)
         output_dir = Path(self.get_parameter("output_dir").value)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -78,16 +87,16 @@ class RecorderNode(Node):
         self._current_bag_path: Path | None = None
 
         self._cameras: dict[str, CameraStream] = {}
-        for name, serial in zip(camera_names, camera_serials):
+        for i, name in enumerate(camera_names):
             if name in self._cameras:
                 raise ValueError(f"Duplicate camera name in camera_names: {name!r}")
             self._cameras[name] = CameraStream(
                 name=name,
-                serial=serial,
-                width=width,
-                height=height,
-                fps=fps,
-                max_depth_m=self._max_depth_m,
+                serial=camera_serials[i],
+                width=int(camera_widths[i]),
+                height=int(camera_heights[i]),
+                fps=int(camera_fps_list[i]),
+                max_depth_m=float(camera_max_depths[i]),
                 bridge=self._bridge,
                 bag=self._bag,
                 logger=self.get_logger(),
@@ -212,7 +221,9 @@ class RecorderNode(Node):
 
         @app.route("/config")
         def config():
-            return jsonify({"max_depth_m": self._max_depth_m})
+            return jsonify(
+                {name: {"max_depth_m": camera.max_depth_m} for name, camera in self._cameras.items()}
+            )
 
         @app.route("/status")
         def status():
