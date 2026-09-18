@@ -23,16 +23,7 @@
 <body>
   <h1>UMI Gripper Data Collection</h1>
   <div class="row">
-    <div class="panel video-stack">
-      <div>
-        <h2>Color</h2>
-        <img class="video" id="video" src="/video_feed">
-      </div>
-      <div>
-        <h2>Depth (0&ndash;<span id="maxDepthLabel">?</span> m)</h2>
-        <img class="video" id="depth" src="/depth_feed">
-      </div>
-    </div>
+    <div id="cameraPanels" class="row"></div>
     <div class="panel">
       <h2>Trajectory (last 20 poses)</h2>
       <div id="traj3d"></div>
@@ -71,12 +62,41 @@
       updateStatus(await res.json());
     }
 
+    let maxDepthM = null;
+
     async function pollMaxDepth() {
       try {
         const res = await fetch('/config');
         const cfg = await res.json();
-        document.getElementById('maxDepthLabel').textContent = cfg.max_depth_m.toFixed(2);
+        maxDepthM = cfg.max_depth_m;
+        document.querySelectorAll('.maxDepthLabel').forEach(el => {
+          el.textContent = maxDepthM.toFixed(2);
+        });
       } catch (e) { /* config endpoint optional */ }
+    }
+
+    async function loadCameraPanels() {
+      const res = await fetch('/cameras');
+      const names = await res.json();
+      const container = document.getElementById('cameraPanels');
+      container.innerHTML = names.map(name => `
+        <div class="panel video-stack">
+          <h2>${name}</h2>
+          <div>
+            <h2>Color</h2>
+            <img class="video" src="/video_feed/${name}">
+          </div>
+          <div>
+            <h2>Depth (0&ndash;<span class="maxDepthLabel">?</span> m)</h2>
+            <img class="video" src="/depth_feed/${name}">
+          </div>
+        </div>
+      `).join('');
+      if (maxDepthM !== null) {
+        document.querySelectorAll('.maxDepthLabel').forEach(el => {
+          el.textContent = maxDepthM.toFixed(2);
+        });
+      }
     }
 
     // -- 3D trajectory view (rviz-like: grid, axes, orbit camera) --------
@@ -203,6 +223,7 @@
     setInterval(pollTrajectory, 100);
     pollStatus();
     pollMaxDepth();
+    loadCameraPanels();
   </script>
 </body>
 </html>

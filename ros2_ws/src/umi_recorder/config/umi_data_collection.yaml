@@ -31,19 +31,29 @@ mocap_bridge_node:
 
 umi_recorder_node:
   ros__parameters:
-    # --- RealSense camera ---
+    # --- RealSense camera(s) ---
     # Captured directly via pyrealsense2 (not through the realsense2_camera
     # ROS node). Depth is aligned to color; no point cloud is computed.
+    # camera_names and camera_serials are matched by position (index 0 <-> index 0, ...),
+    # same convention as mocap_bridge_node's rigid_body_ids/rigid_body_names above.
+    # Up to 4 cameras. Find each camera's serial with:
+    #   ros2 run realsense2_camera rs-enumerate-devices   (or `rs-enumerate-devices` if installed standalone)
+    # To record with a single camera, leave one entry in each list, e.g.:
+    #   camera_names: ["camera_0"]
+    #   camera_serials: ["135422077356"]
+    # To record with multiple cameras (up to 4), add matching entries, e.g.:
+    #   camera_names: ["front", "wrist", "side"]
+    #   camera_serials: ["135422077356", "827312071475", "923322071188"]
+    camera_names: ["camera_0"]
+    camera_serials: ["335222074368"]
     camera_width: 640
     camera_height: 480
     camera_fps: 30
 
     # --- Input topics ---
-    # color_topic/depth_topic only name the topics written into the recorded
-    # bag (there's no live ROS Image publisher to subscribe to anymore).
     # pose_topic must match "/mocap/<rigid_body_names[i]>/pose" from mocap_bridge_node above.
-    color_topic: "/camera/color/image_raw"
-    depth_topic: "/camera/aligned_depth_to_color/image_raw"
+    # (Each camera's own color/depth topics are derived from camera_names above,
+    # e.g. "front" -> /front/color/image_raw, /front/aligned_depth_to_color/image_raw.)
     pose_topic: "/mocap/UMI_HandRight/pose"
 
     # --- Depth visualization ---
