@@ -1,5 +1,0 @@
-mocap_bridge_node:
-  ros__parameters:
-    frame_id: mocap
-    publish_rate_hz: 120
-    pose_max_age_ms: 250

@@ -31,18 +31,30 @@ geometry_msgs::msg::PoseStamped toPoseStamped(
 class MocapBridgeNode : public rclcpp::Node {
  public:
   MocapBridgeNode() : Node("mocap_bridge_node") {
-    declare_parameter<std::string>("config_path", "");
     declare_parameter<std::string>("frame_id", "mocap");
     declare_parameter<int>("publish_rate_hz", 120);
     declare_parameter<int>("pose_max_age_ms", 250);
+    declare_parameter<std::string>("server_address", "192.168.0.189");
+    declare_parameter<std::string>("local_address", "0.0.0.0");
+    declare_parameter<bool>("use_multicast", false);
+    declare_parameter<int>("command_port", 1510);
+    declare_parameter<int>("data_port", 1511);
+    declare_parameter<std::vector<int64_t>>("rigid_body_ids", {6});
+    declare_parameter<std::vector<std::string>>("rigid_body_names", {"umi_gripper"});
 
-    const auto config_path = get_parameter("config_path").as_string();
     frame_id_ = get_parameter("frame_id").as_string();
     max_age_ = std::chrono::milliseconds(get_parameter("pose_max_age_ms").as_int());
 
-    mocap_subscriber::NatNetConfig config =
-        config_path.empty() ? mocap_subscriber::NatNetConfig{}
-                             : mocap_subscriber::loadNatNetConfig(config_path);
+    mocap_subscriber::NatNetConfig config;
+    config.server_address = get_parameter("server_address").as_string();
+    config.local_address = get_parameter("local_address").as_string();
+    config.use_multicast = get_parameter("use_multicast").as_bool();
+    config.command_port = static_cast<uint16_t>(get_parameter("command_port").as_int());
+    config.data_port = static_cast<uint16_t>(get_parameter("data_port").as_int());
+    for (const auto id : get_parameter("rigid_body_ids").as_integer_array()) {
+      config.rigid_body_ids.push_back(static_cast<int32_t>(id));
+    }
+    config.rigid_body_names = get_parameter("rigid_body_names").as_string_array();
 
     client_ = std::make_unique<mocap_subscriber::NatNetClient>(config);
     if (!client_->start()) {

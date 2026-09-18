@@ -1,0 +1,45 @@
+# =============================================================================
+# UMI Data Collection - main configuration
+#
+# Edit the values below for your setup, then launch with:
+#   ros2 launch umi_recorder umi_recorder.launch.py
+# (or pass config:=/path/to/your/copy.yaml to use a different file without
+# editing the installed one).
+# =============================================================================
+
+mocap_bridge_node:
+  ros__parameters:
+    # --- Mocap (OptiTrack/Motive NatNet) connection ---
+    server_address: "10.155.0.195"   # IP of the Windows PC running Motive
+    local_address: "10.152.42.90"    # IP of this Linux PC (use "0.0.0.0" to listen on all interfaces)
+    use_multicast: false             # false = unicast, true = multicast (must match Motive's streaming setting)
+    command_port: 1510
+    data_port: 1511
+
+    # --- Tracked rigid body/bodies ---
+    # rigid_body_ids and rigid_body_names are matched by position (index 0 <-> index 0, ...).
+    # To track more than one object, add entries to both lists, e.g.:
+    #   rigid_body_ids: [11, 12]
+    #   rigid_body_names: ["UMI_HandRight", "box1"]
+    rigid_body_ids: [11]
+    rigid_body_names: ["UMI_HandRight"]
+
+    # --- Publishing behavior ---
+    frame_id: "mocap"        # frame_id stamped on published PoseStamped messages
+    publish_rate_hz: 120     # how often to publish the latest pose
+    pose_max_age_ms: 250     # a pose older than this (no fresh mocap data) is not published
+
+umi_recorder_node:
+  ros__parameters:
+    # --- Input topics ---
+    # pose_topic must match "/mocap/<rigid_body_names[i]>/pose" from mocap_bridge_node above.
+    color_topic: "/camera/camera/color/image_raw"
+    depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
+    pose_topic: "/mocap/UMI_HandRight/pose"
+
+    # --- Output ---
+    output_dir: "/home/hier-tony/umi_episodes"   # where recorded ROS 2 bags (one per episode) are saved
+
+    # --- Web UI (Record/Stop, live video + trajectory) ---
+    web_host: "0.0.0.0"   # 0.0.0.0 = reachable from other machines on the network
+    web_port: 8080

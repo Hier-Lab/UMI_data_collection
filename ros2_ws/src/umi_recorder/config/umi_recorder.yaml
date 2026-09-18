@@ -1,8 +1,0 @@
-umi_recorder_node:
-  ros__parameters:
-    color_topic: /camera/camera/color/image_raw
-    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
-    pose_topic: /mocap/umi_gripper/pose
-    output_dir: /home/hier-tony/umi_episodes
-    web_host: 0.0.0.0
-    web_port: 8080
