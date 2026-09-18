@@ -91,6 +91,17 @@ class CameraStream:
         config.enable_stream(rs.stream.depth, self._width, self._height, rs.format.z16, self._fps)
         align = rs.align(rs.stream.color)
 
+        # Standard librealsense depth-denoising pipeline, applied in the
+        # order the SDK documents: depth -> disparity (denoising filters
+        # work better in disparity space) -> spatial -> temporal ->
+        # disparity -> depth. Deliberately no hole-filling filter: that
+        # would extrapolate depth for pixels with no real return, and
+        # a downstream policy should not be trained on fabricated depth.
+        depth_to_disparity = rs.disparity_transform(True)
+        spatial_filter = rs.spatial_filter()
+        temporal_filter = rs.temporal_filter()
+        disparity_to_depth = rs.disparity_transform(False)
+
         profile = pipeline.start(config)
         # Depth scale (meters per raw depth unit) varies by camera model - e.g.
         # ~0.001 (1mm/unit) on a D435i vs ~0.0001 (0.1mm/unit) on a D405.
@@ -109,6 +120,11 @@ class CameraStream:
                 depth_frame = frames.get_depth_frame()
                 if not color_frame or not depth_frame:
                     continue
+
+                depth_frame = depth_to_disparity.process(depth_frame)
+                depth_frame = spatial_filter.process(depth_frame)
+                depth_frame = temporal_filter.process(depth_frame)
+                depth_frame = disparity_to_depth.process(depth_frame)
 
                 color = np.asanyarray(color_frame.get_data())
                 depth_raw = np.asanyarray(depth_frame.get_data())

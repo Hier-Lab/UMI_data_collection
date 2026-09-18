@@ -55,7 +55,7 @@ umi_recorder_node:
     #   camera_fps: [30, 30]
     #   camera_max_depth_m: [0.5, 2.0]   # D405's usable range is much shorter than D435i's
     camera_names: ["camera_0"]
-    camera_serials: ["335222074368"]
+    camera_serials: ["260422272872"]
     camera_widths: [640]
     camera_heights: [480]
     camera_fps: [30]
