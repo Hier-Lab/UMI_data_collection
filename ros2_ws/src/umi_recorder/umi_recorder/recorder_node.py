@@ -166,6 +166,10 @@ class RecorderNode(Node):
             "x": msg.pose.position.x,
             "y": msg.pose.position.y,
             "z": msg.pose.position.z,
+            "qx": msg.pose.orientation.x,
+            "qy": msg.pose.orientation.y,
+            "qz": msg.pose.orientation.z,
+            "qw": msg.pose.orientation.w,
         }
         with self._lock:
             self._trajectory.append(point)

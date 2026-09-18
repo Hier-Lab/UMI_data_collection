@@ -98,14 +98,33 @@
     scene.add(new THREE.AxesHelper(0.3));
 
     const trajGeometry = new THREE.BufferGeometry();
-    const trajMaterial = new THREE.LineBasicMaterial({ color: 0x4caf50, linewidth: 2 });
+    const trajMaterial = new THREE.LineBasicMaterial({ color: 0x4caf50 });
     const trajLine = new THREE.Line(trajGeometry, trajMaterial);
     scene.add(trajLine);
+
+    // Small dot at every trajectory sample, so even sub-millimeter motion
+    // (a nearly-stationary gripper) is visible as a cluster, not invisible
+    // next to the larger current-position marker.
+    const MAX_POINT_DOTS = 20;
+    const pointDotGeometry = new THREE.SphereGeometry(0.004, 8, 8);
+    const pointDotMaterial = new THREE.MeshBasicMaterial({ color: 0x81c784 });
+    const pointDots = [];
+    for (let i = 0; i < MAX_POINT_DOTS; i++) {
+      const dot = new THREE.Mesh(pointDotGeometry, pointDotMaterial);
+      dot.visible = false;
+      scene.add(dot);
+      pointDots.push(dot);
+    }
 
     const currentPosGeometry = new THREE.SphereGeometry(0.012, 16, 16);
     const currentPosMaterial = new THREE.MeshBasicMaterial({ color: 0xf44336 });
     const currentPosMarker = new THREE.Mesh(currentPosGeometry, currentPosMaterial);
     scene.add(currentPosMarker);
+
+    // Orientation gizmo: small XYZ axes attached at the current pose,
+    // rotated by its orientation quaternion (red=X, green=Y, blue=Z).
+    const orientationAxes = new THREE.AxesHelper(0.08);
+    scene.add(orientationAxes);
 
     // Simple orbit controls (drag to rotate, wheel to zoom) without extra script deps.
     let isDragging = false, lastX = 0, lastY = 0;
@@ -141,13 +160,32 @@
       if (points.length === 0) {
         trajGeometry.setFromPoints([]);
         currentPosMarker.visible = false;
+        orientationAxes.visible = false;
+        pointDots.forEach(d => d.visible = false);
         return;
       }
       const vecs = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
       trajGeometry.setFromPoints(vecs);
-      const last = vecs[vecs.length - 1];
-      currentPosMarker.position.copy(last);
+
+      pointDots.forEach((dot, i) => {
+        if (i < vecs.length) {
+          dot.position.copy(vecs[i]);
+          dot.visible = true;
+        } else {
+          dot.visible = false;
+        }
+      });
+
+      const lastPoint = points[points.length - 1];
+      const lastVec = vecs[vecs.length - 1];
+      currentPosMarker.position.copy(lastVec);
       currentPosMarker.visible = true;
+
+      orientationAxes.position.copy(lastVec);
+      if (typeof lastPoint.qx === 'number') {
+        orientationAxes.quaternion.set(lastPoint.qx, lastPoint.qy, lastPoint.qz, lastPoint.qw);
+      }
+      orientationAxes.visible = true;
     }
 
     function animate() {
