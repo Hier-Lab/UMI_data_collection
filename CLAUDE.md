@@ -8,9 +8,16 @@ A data collection UI for UMI hand-grippers that records human demonstrations to 
 
 ## Commands
 
+First-time setup — `mocap_bridge` pulls in `mocap_subscriber` as a git submodule:
+
+```bash
+git submodule update --init --recursive
+```
+
 Build (run from `ros2_ws/`):
 
 ```bash
+source /opt/ros/humble/setup.bash
 cd ros2_ws
 colcon build --symlink-install
 source install/setup.bash
@@ -41,7 +48,7 @@ ros2 bag info ~/umi_episodes/episode_20260101_120000
 
 Workspace: `ros2_ws/src/`, two packages.
 
-**`mocap_bridge`** (C++, `ament_cmake`) — wraps the vendored NatNet client from `/home/hier-tony/Projects/mocap_subscriber` (copied into `third_party/MoCapParser/`, not a live dependency — resync manually if the upstream client changes) and publishes `geometry_msgs/PoseStamped` per tracked rigid body on `mocap/<name>/pose`. Polls `NatNetClient::latestPoseById()` on a timer (`publish_rate_hz` param, default 120 Hz) and skips publishing when `isPoseFresh()` is false rather than publishing stale poses. Config (server/local IP, rigid body IDs/names) lives in `config/natnet.conf`, same format as upstream.
+**`mocap_bridge`** (C++, `ament_cmake`) — wraps the NatNet client from [mocap_subscriber](https://github.com/lgkimjy/mocap_subscriber), pulled in as a git submodule at `third_party/mocap_subscriber/` (built via `add_subdirectory`, so it tracks a pinned commit — bump the submodule and commit the pointer to pick up upstream changes) and publishes `geometry_msgs/PoseStamped` per tracked rigid body on `mocap/<name>/pose`. Polls `NatNetClient::latestPoseById()` on a timer (`publish_rate_hz` param, default 120 Hz) and skips publishing when `isPoseFresh()` is false rather than publishing stale poses. Config (server/local IP, rigid body IDs/names) lives in `config/natnet.conf`, same format as upstream.
 
 **`umi_recorder`** (Python, `ament_python`) — the recorder + web UI, all in `recorder_node.py`:
 - Subscribes to RealSense color/depth (`sensor_msgs/Image`, default topics from `realsense2_camera` with `align_depth` enabled) and to the mocap bridge's `PoseStamped` topic.
