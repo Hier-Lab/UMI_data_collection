@@ -14,11 +14,12 @@ from cv_bridge import CvBridge
 from flask import Flask, Response, jsonify, render_template
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 from umi_recorder.bag_writer import EpisodeBagWriter
 
-MAX_TRAJECTORY_POINTS = 2000
+MAX_TRAJECTORY_POINTS = 20
 
 
 class RecorderNode(Node):
@@ -50,9 +51,9 @@ class RecorderNode(Node):
         self._depth_topic = depth_topic
         self._pose_topic = pose_topic
 
-        self.create_subscription(Image, color_topic, self._on_color, 10)
-        self.create_subscription(Image, depth_topic, self._on_depth, 10)
-        self.create_subscription(PoseStamped, pose_topic, self._on_pose, 10)
+        self.create_subscription(Image, color_topic, self._on_color, qos_profile_sensor_data)
+        self.create_subscription(Image, depth_topic, self._on_depth, qos_profile_sensor_data)
+        self.create_subscription(PoseStamped, pose_topic, self._on_pose, qos_profile_sensor_data)
 
         self._app = self._build_flask_app()
         self._web_thread = threading.Thread(
@@ -147,7 +148,7 @@ class RecorderNode(Node):
         @app.route("/trajectory")
         def trajectory():
             with self._lock:
-                return jsonify(self._trajectory[-500:])
+                return jsonify(self._trajectory[-MAX_TRAJECTORY_POINTS:])
 
         @app.route("/status")
         def status():
