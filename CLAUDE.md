@@ -17,6 +17,12 @@ git submodule update --init --recursive
 # umi_recorder captures RealSense frames directly via pyrealsense2
 # (not through the realsense2_camera ROS node) - install the Python bindings:
 pip3 install pyrealsense2
+
+# rgbd_odometry needs open3d + a modern numpy, which conflict with the
+# numpy this ROS 2 Humble environment pins - they run in a dedicated venv:
+python3 -m pip install --user virtualenv   # if `python3 -m venv` isn't available
+virtualenv ros2_ws/src/rgbd_odometry/.venv
+ros2_ws/src/rgbd_odometry/.venv/bin/pip install open3d numpy
 ```
 
 Build (run from `ros2_ws/`):
@@ -55,9 +61,15 @@ Inspect a recorded bag:
 ros2 bag info ~/umi_episodes/episode_20260101_120000
 ```
 
+Post-process one camera of a recorded episode into RGBD visual odometry (writes `/<camera>/visual_odom` back into that same bag — see [rgbd_odometry](#rgbd_odometry-post-processing) below):
+
+```bash
+ros2 run rgbd_odometry compute_odometry --bag ~/umi_episodes/episode_20260101_120000 --camera wrist --depth-trunc 0.5
+```
+
 ## Architecture
 
-Workspace: `ros2_ws/src/`, two packages.
+Workspace: `ros2_ws/src/`, three packages.
 
 **`mocap_bridge`** (C++, `ament_cmake`) — wraps the NatNet client from [mocap_subscriber](https://github.com/lgkimjy/mocap_subscriber), pulled in as a git submodule at `third_party/mocap_subscriber/` (built via `add_subdirectory`, so it tracks a pinned commit — bump the submodule and commit the pointer to pick up upstream changes) and publishes `geometry_msgs/PoseStamped` per tracked rigid body on `mocap/<name>/pose`. Builds a `mocap_subscriber::NatNetConfig` directly from ROS params (`server_address`, `local_address`, `use_multicast`, `command_port`, `data_port`, `rigid_body_ids`, `rigid_body_names` — the last two are matched by position, so tracking multiple objects means extending both lists together) rather than reading `mocap_subscriber`'s own file format. Polls `NatNetClient::latestPoseById()` on a timer and skips publishing when `isPoseFresh()` is false rather than publishing stale poses.
 
@@ -72,6 +84,16 @@ Workspace: `ros2_ws/src/`, two packages.
 - `CameraStream._run` is a two-level retry loop: the outer loop calls `_wait_for_device()` then `_run_pipeline()`, and any exception from `_run_pipeline()` (device unplugged, driver error) is caught, logged, and retried after a 2s backoff rather than permanently ending that camera's thread. Inside `_run_pipeline()`, a single `wait_for_frames()` timeout (`RuntimeError`) is treated as transient and the loop just continues — only an exception outside that inner try/except tears the pipeline down for a full reconnect. This matters because `CameraStream`s are fully independent: one camera failing (wrong/missing serial, mid-session disconnect) must never affect any other configured camera, the web UI, or the pose subscription — verified by running with one real camera + one nonexistent serial simultaneously (the real one streamed at a steady 30fps the whole time while the missing one just logged and waited).
 
 Both nodes' parameters live together in one file, `umi_recorder/config/umi_data_collection.yaml`, as separate `mocap_bridge_node:`/`umi_recorder_node:` top-level sections (ROS 2's standard multi-node YAML params format — each node only reads its own section, so passing the whole file to both is intentional, not a bug). `launch/umi_recorder.launch.py` brings up only `mocap_bridge_node` and `recorder_node` (no `realsense2_camera` node — the camera is owned exclusively by `recorder_node`'s pyrealsense2 pipeline, and only one process can hold the USB device at a time), and exposes the config file as a single launch argument (`umi_config`).
+
+### `rgbd_odometry` post-processing
+
+**`rgbd_odometry`** (Python, `ament_python`) — a standalone post-processing CLI (`ros2 run rgbd_odometry compute_odometry --bag <path> --camera <name>`), not part of the live recording pipeline. It reads one camera's `color/image_raw`, `aligned_depth_to_color/image_raw`, and `color/camera_info` from an already-recorded episode bag, computes frame-to-frame RGBD odometry with Open3D (hybrid Jacobian term — combines the geometric point-to-plane and photometric color constraints), and writes the resulting trajectory back into that same bag as a new `/<camera>/visual_odom` (`geometry_msgs/PoseStamped`) topic — one pose per color frame after the first (which gets an identity pose at the same timestamp).
+
+- **Why a subprocess + dedicated venv** (`.venv/`, gitignored, not checked in): `open3d` 0.20 needs a numpy ABI incompatible with the numpy this ROS 2 Humble environment pins for `rclpy`/`cv_bridge`/`rosbag2_py` — `o3d.geometry.Image(numpy_array)` fails outright (`RuntimeError: Image can only be initialized from buffer of uint8, uint16, or float!`) even for a correctly-typed, contiguous, freshly-copied array, confirmed not to be an array-property issue. `compute_odometry.py` (system Python, has ROS access) extracts and pairs color/depth/intrinsics from the bag, writes them to a temporary `.npz`, and invokes `_venv_odometry.py` as a subprocess inside `.venv` (modern numpy + open3d) via `subprocess.run`; the venv script does the actual Open3D math and writes a trajectory `.npz` back. Set up the venv with `virtualenv .venv && .venv/bin/pip install open3d numpy` (needs `pip install --user virtualenv` first if `python3 -m venv` isn't available, which it wasn't on this platform — no `python3-venv` package and no sudo to install it).
+- `rotation_matrix_to_quaternion()` in `compute_odometry.py` is a hand-rolled Shepperd's-method matrix→quaternion conversion, not `scipy.spatial.transform.Rotation` — deliberately, to avoid pulling another numpy-ABI-sensitive dependency into the system-Python side of this split.
+- `bag_io.py`'s `AugmentedBagWriter` exists because `rosbag2_py.SequentialWriter` is write-once — there's no API to append a topic to an already-closed bag. It copies every message from the source bag into a new temp bag (preserving original topics/types), lets the caller `write_extra()` the new topic's messages interleaved, then `finalize()` closes the temp bag and atomically replaces the source bag directory with it. This means running `compute_odometry` twice on the same bag/camera is safe (it re-reads whatever is currently there and appends `visual_odom` again) but destructive if interrupted mid-`finalize()` — the source is deleted before the temp bag is moved into place.
+- Requires the bag to already have `/<camera>/color/camera_info` (added to `umi_recorder` for exactly this reason — see above); a bag recorded before that change has no way to recover real intrinsics and `compute_odometry` will refuse to run against it with a clear error.
+- Verified end-to-end against a real 5-second D405 recording (151 color / 150 depth frames): ran successfully, wrote 151 `visual_odom` poses, and the resulting positions/quaternions are physically plausible (near-identity, matching the camera being essentially stationary during that test) with no NaNs or discontinuities.
 
 ## Notes
 
