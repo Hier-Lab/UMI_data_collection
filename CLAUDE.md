@@ -34,7 +34,7 @@ Then open `http://<host>:8080` for the Record/Stop UI. Recorded episodes land in
 All settings (mocap IP/ports, tracked rigid bodies, camera/pose topics, recording output, web host/port) live in one file: [`ros2_ws/src/umi_recorder/config/umi_data_collection.yaml`](ros2_ws/src/umi_recorder/config/umi_data_collection.yaml), with inline comments. Edit it directly, or point the launch file at your own copy without touching the installed one:
 
 ```bash
-ros2 launch umi_recorder umi_recorder.launch.py config:=/path/to/my_umi_data_collection.yaml
+ros2 launch umi_recorder umi_recorder.launch.py umi_config:=/path/to/my_umi_data_collection.yaml
 ```
 
 Run nodes individually for debugging (both read the same file, each using only its own top-level section):
@@ -62,7 +62,7 @@ Workspace: `ros2_ws/src/`, two packages.
 - `/video_feed` serves an MJPEG stream re-encoded from the latest color frame; `/trajectory` returns the last 500 pose points as JSON for the canvas plot in `templates/index.html`.
 - Record/Stop (`/record`, `/stop` POST endpoints) toggle `EpisodeBagWriter` (`bag_writer.py`), a thin `rosbag2_py.SequentialWriter` wrapper — one bag per episode, topics registered lazily on first message once recording starts. All three subscribed topics (color, depth, pose) are written into the same bag so an episode is fully self-contained and time-synchronized via ROS message timestamps.
 
-Both nodes' parameters live together in one file, `umi_recorder/config/umi_data_collection.yaml`, as separate `mocap_bridge_node:`/`umi_recorder_node:` top-level sections (ROS 2's standard multi-node YAML params format — each node only reads its own section, so passing the whole file to both is intentional, not a bug). `launch/umi_recorder.launch.py` brings up `realsense2_camera`'s `rs_launch.py` (640x480@30, depth aligned to color) plus both nodes, and exposes the config file as a single launch argument (`config`) so a deployment-specific setup doesn't require editing the installed package file.
+Both nodes' parameters live together in one file, `umi_recorder/config/umi_data_collection.yaml`, as separate `mocap_bridge_node:`/`umi_recorder_node:` top-level sections (ROS 2's standard multi-node YAML params format — each node only reads its own section, so passing the whole file to both is intentional, not a bug). `launch/umi_recorder.launch.py` brings up `realsense2_camera`'s `rs_launch.py` (640x480@30, depth aligned to color) plus both nodes, and exposes the config file as a single launch argument (`umi_config` — named to avoid colliding with `rs_launch.py`'s own `config` argument for a RealSense device JSON) so a deployment-specific setup doesn't require editing the installed package file.
 
 ## Notes
 

@@ -51,7 +51,10 @@ class MocapBridgeNode : public rclcpp::Node {
     config.use_multicast = get_parameter("use_multicast").as_bool();
     config.command_port = static_cast<uint16_t>(get_parameter("command_port").as_int());
     config.data_port = static_cast<uint16_t>(get_parameter("data_port").as_int());
-    for (const auto id : get_parameter("rigid_body_ids").as_integer_array()) {
+    const rclcpp::Parameter rigid_body_ids_param = get_parameter("rigid_body_ids");
+    const std::vector<int64_t> raw_ids = rigid_body_ids_param.as_integer_array();
+    config.rigid_body_ids.clear();
+    for (const int64_t id : raw_ids) {
       config.rigid_body_ids.push_back(static_cast<int32_t>(id));
     }
     config.rigid_body_names = get_parameter("rigid_body_names").as_string_array();
