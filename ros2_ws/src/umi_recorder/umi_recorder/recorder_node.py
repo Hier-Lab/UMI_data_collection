@@ -3,6 +3,7 @@ demonstrations into a ROS 2 bag, controlled by a Flask web UI."""
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from flask import Flask, Response, jsonify, render_template
 from geometry_msgs.msg import PoseStamped
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
@@ -43,6 +46,8 @@ class RecorderNode(Node):
 
         self._bridge = CvBridge()
         self._lock = threading.Lock()
+        self._color_ready = threading.Condition(self._lock)
+        self._depth_ready = threading.Condition(self._lock)
         self._latest_color_jpeg: bytes | None = None
         self._latest_depth_jpeg: bytes | None = None
         self._trajectory: list[dict] = []
@@ -54,9 +59,18 @@ class RecorderNode(Node):
         self._depth_topic = depth_topic
         self._pose_topic = pose_topic
 
-        self.create_subscription(Image, color_topic, self._on_color, qos_profile_sensor_data)
-        self.create_subscription(Image, depth_topic, self._on_depth, qos_profile_sensor_data)
-        self.create_subscription(PoseStamped, pose_topic, self._on_pose, qos_profile_sensor_data)
+        color_group = MutuallyExclusiveCallbackGroup()
+        depth_group = MutuallyExclusiveCallbackGroup()
+        pose_group = MutuallyExclusiveCallbackGroup()
+        self.create_subscription(
+            Image, color_topic, self._on_color, qos_profile_sensor_data, callback_group=color_group
+        )
+        self.create_subscription(
+            Image, depth_topic, self._on_depth, qos_profile_sensor_data, callback_group=depth_group
+        )
+        self.create_subscription(
+            PoseStamped, pose_topic, self._on_pose, qos_profile_sensor_data, callback_group=pose_group
+        )
 
         self._app = self._build_flask_app()
         self._web_thread = threading.Thread(
@@ -82,8 +96,9 @@ class RecorderNode(Node):
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         if ok:
-            with self._lock:
+            with self._color_ready:
                 self._latest_color_jpeg = jpeg.tobytes()
+                self._color_ready.notify_all()
 
         if self._recording:
             self._bag.register_topic(self._color_topic, "sensor_msgs/msg/Image")
@@ -98,8 +113,9 @@ class RecorderNode(Node):
         colorized[depth_mm == 0] = 0  # no-return pixels stay black instead of "far"
         ok, jpeg = cv2.imencode(".jpg", colorized, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         if ok:
-            with self._lock:
+            with self._depth_ready:
                 self._latest_depth_jpeg = jpeg.tobytes()
+                self._depth_ready.notify_all()
 
         if self._recording:
             self._bag.register_topic(self._depth_topic, "sensor_msgs/msg/Image")
@@ -145,6 +161,7 @@ class RecorderNode(Node):
     # -- Flask app -----------------------------------------------------------
 
     def _build_flask_app(self) -> Flask:
+        logging.getLogger("werkzeug").setLevel(logging.WARNING)
         template_folder = Path(get_package_share_directory("umi_recorder")) / "templates"
         app = Flask(__name__, template_folder=str(template_folder))
 
@@ -199,19 +216,28 @@ class RecorderNode(Node):
     def _mjpeg_generator(self, stream: str):
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
         _, blank_jpeg = cv2.imencode(".jpg", blank)
+        blank_jpeg = blank_jpeg.tobytes()
+        condition = self._color_ready if stream == "color" else self._depth_ready
+        last_sent: bytes | None = None
+
         while rclpy.ok():
-            with self._lock:
+            with condition:
+                condition.wait(timeout=1.0)
                 latest = self._latest_color_jpeg if stream == "color" else self._latest_depth_jpeg
-                frame = latest or blank_jpeg.tobytes()
+            frame = latest or blank_jpeg
+            if frame is last_sent:
+                continue  # timed out with no new frame; avoid resending the same bytes
+            last_sent = frame
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            threading.Event().wait(1 / 30)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = RecorderNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
