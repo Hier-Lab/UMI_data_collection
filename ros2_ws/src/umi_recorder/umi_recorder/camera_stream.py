@@ -6,11 +6,13 @@ owning node is recording, a ROS 2 bag via a shared EpisodeBagWriter.
 from __future__ import annotations
 
 import threading
+import traceback
 
 import cv2
 import numpy as np
 import pyrealsense2 as rs
 import rclpy
+from sensor_msgs.msg import CameraInfo
 
 
 class CameraStream:
@@ -31,6 +33,9 @@ class CameraStream:
         self.serial = serial
         self.color_topic = f"/{name}/color/image_raw"
         self.depth_topic = f"/{name}/aligned_depth_to_color/image_raw"
+        self.camera_info_topic = f"/{name}/color/camera_info"
+        self._camera_info_msg: CameraInfo | None = None
+        self._camera_info_written_this_recording = False
 
         self._width = width
         self._height = height
@@ -60,6 +65,22 @@ class CameraStream:
 
     def set_recording(self, recording: bool) -> None:
         self._recording = recording
+        if recording:
+            self._camera_info_written_this_recording = False
+
+    def _build_camera_info(self, profile) -> CameraInfo:
+        """Build a sensor_msgs/CameraInfo from the color stream's real
+        intrinsics (aligned depth shares the color stream's intrinsics)."""
+        intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        msg = CameraInfo()
+        msg.width = intr.width
+        msg.height = intr.height
+        msg.distortion_model = "plumb_bob"
+        msg.d = list(intr.coeffs)
+        msg.k = [intr.fx, 0.0, intr.ppx, 0.0, intr.fy, intr.ppy, 0.0, 0.0, 1.0]
+        msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        msg.p = [intr.fx, 0.0, intr.ppx, 0.0, 0.0, intr.fy, intr.ppy, 0.0, 0.0, 0.0, 1.0, 0.0]
+        return msg
 
     def _wait_for_device(self, poll_interval_s: float = 2.0) -> None:
         """Block until self.serial is enumerated, logging periodically instead
@@ -80,10 +101,26 @@ class CameraStream:
             self._stop.wait(poll_interval_s)
 
     def _run(self) -> None:
-        self._wait_for_device()
-        if self._stop.is_set():
-            return
+        # Outer loop: (re)connect to the camera. A pipeline-level failure
+        # (camera unplugged mid-session, driver error) logs and retries
+        # after a short backoff instead of permanently ending this camera's
+        # thread - one camera dying must never affect any other CameraStream
+        # or stop the web UI/other cameras from working.
+        while not self._stop.is_set() and rclpy.ok():
+            self._wait_for_device()
+            if self._stop.is_set():
+                return
+            try:
+                self._run_pipeline()
+            except Exception:
+                self._logger.error(
+                    f"[{self.name}] pyrealsense2 pipeline failed, will retry: "
+                    f"{traceback.format_exc()}"
+                )
+            if not self._stop.is_set():
+                self._stop.wait(2.0)
 
+    def _run_pipeline(self) -> None:
         pipeline = rs.pipeline()
         config = rs.config()
         config.enable_device(self.serial)
@@ -102,19 +139,29 @@ class CameraStream:
         temporal_filter = rs.temporal_filter()
         disparity_to_depth = rs.disparity_transform(False)
 
-        profile = pipeline.start(config)
-        # Depth scale (meters per raw depth unit) varies by camera model - e.g.
-        # ~0.001 (1mm/unit) on a D435i vs ~0.0001 (0.1mm/unit) on a D405.
-        # Treating raw units as millimeters unconditionally silently produced
-        # a 10x-wrong depth reading on the D405 (everything looked "far").
-        depth_scale_m = profile.get_device().first_depth_sensor().get_depth_scale()
-        self._logger.info(
-            f"[{self.name}] pyrealsense2 pipeline started ({self._width}x{self._height}"
-            f"@{self._fps}, serial={self.serial}, depth_scale={depth_scale_m}m/unit)"
-        )
         try:
+            profile = pipeline.start(config)
+            # Depth scale (meters per raw depth unit) varies by camera model - e.g.
+            # ~0.001 (1mm/unit) on a D435i vs ~0.0001 (0.1mm/unit) on a D405.
+            # Treating raw units as literal millimeters unconditionally silently
+            # produced a 10x-wrong depth reading on the D405 (everything looked "far").
+            depth_scale_m = profile.get_device().first_depth_sensor().get_depth_scale()
+            self._camera_info_msg = self._build_camera_info(profile)
+            self._logger.info(
+                f"[{self.name}] pyrealsense2 pipeline started ({self._width}x{self._height}"
+                f"@{self._fps}, serial={self.serial}, depth_scale={depth_scale_m}m/unit)"
+            )
+
             while not self._stop.is_set() and rclpy.ok():
-                frames = pipeline.wait_for_frames(timeout_ms=1000)
+                try:
+                    frames = pipeline.wait_for_frames(timeout_ms=1000)
+                except RuntimeError:
+                    # Transient: a single frame was late/dropped. Keep the
+                    # pipeline alive and try again rather than tearing it
+                    # down over what is usually a one-off hiccup.
+                    self._logger.warning(f"[{self.name}] frame wait timed out; continuing")
+                    continue
+
                 frames = align.process(frames)
                 color_frame = frames.get_color_frame()
                 depth_frame = frames.get_depth_frame()
@@ -134,8 +181,6 @@ class CameraStream:
                 stamp = self._clock.now()
                 self._handle_color(color, stamp)
                 self._handle_depth(depth_mm, stamp)
-        except Exception:
-            self._logger.exception(f"[{self.name}] pyrealsense2 capture loop stopped")
         finally:
             pipeline.stop()
 
@@ -151,6 +196,12 @@ class CameraStream:
             msg.header.stamp = stamp.to_msg()
             self._bag.register_topic(self.color_topic, "sensor_msgs/msg/Image")
             self._bag.write(self.color_topic, msg, stamp.nanoseconds)
+
+            if not self._camera_info_written_this_recording and self._camera_info_msg is not None:
+                self._camera_info_msg.header.stamp = stamp.to_msg()
+                self._bag.register_topic(self.camera_info_topic, "sensor_msgs/msg/CameraInfo")
+                self._bag.write(self.camera_info_topic, self._camera_info_msg, stamp.nanoseconds)
+                self._camera_info_written_this_recording = True
 
     def _handle_depth(self, depth_mm: np.ndarray, stamp) -> None:
         max_depth_mm = self.max_depth_m * 1000.0
