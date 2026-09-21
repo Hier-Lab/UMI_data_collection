@@ -1,0 +1,3 @@
+[submodule "ros2_ws/src/mocap_bridge/third_party/mocap_subscriber"]
+	path = ros2_ws/src/mocap_bridge/third_party/mocap_subscriber
+	url = https://github.com/lgkimjy/mocap_subscriber.git
