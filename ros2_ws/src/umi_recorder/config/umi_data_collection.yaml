@@ -84,10 +84,18 @@ umi_recorder_node:
     exo_camera_max_depth_m: 3.0
 
     # --- Input topics ---
-    # pose_topic must match "/mocap/<rigid_body_names[i]>/pose" from mocap_bridge_node above.
-    # (Each camera's own color/depth topics are derived from camera_names above,
-    # e.g. "front" -> /front/color/image_raw, /front/aligned_depth_to_color/image_raw.)
-    pose_topic: "/mocap/UMI_HandRight/pose"
+    # pose_names/pose_topics are matched by position (same convention as
+    # camera_names/camera_serials above) - one entry per tracked UMI device.
+    # Each pose_topics[i] must match "/mocap/<rigid_body_names[j]>/pose" for
+    # the corresponding rigid body in mocap_bridge_node above (names don't
+    # have to match exactly - pose_names[i] is just this device's label in
+    # the recorded bag topic and the web UI's 3D trail).
+    #
+    # Two UMI devices example:
+    #   pose_names: ["right_hand", "left_hand"]
+    #   pose_topics: ["/mocap/UMI_HandRight/pose", "/mocap/UMI_HandLeft/pose"]
+    pose_names: ["umi_gripper"]
+    pose_topics: ["/mocap/UMI_HandRight/pose"]
 
     # --- Output ---
     output_dir: "/home/hier-tony/umi_episodes"   # where recorded ROS 2 bags (one per episode) are saved

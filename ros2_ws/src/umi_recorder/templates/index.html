@@ -11,7 +11,7 @@
     .panel { background: #2a2a2a; border-radius: 8px; padding: 12px; }
     .panel h2 { font-size: 0.85rem; margin: 0 0 8px; color: #aaa; font-weight: normal; text-transform: uppercase; letter-spacing: 0.05em; }
     img.video { width: 424px; height: 318px; background: #000; border-radius: 6px; display: block; }
-    #traj3d { width: 480px; height: 480px; border-radius: 6px; overflow: hidden; }
+    .traj3d { width: 420px; height: 420px; border-radius: 6px; overflow: hidden; }
     button { font-size: 1rem; padding: 10px 20px; margin-right: 10px; border: none; border-radius: 6px; cursor: pointer; }
     #recordBtn { background: #d33; color: white; }
     #stopBtn { background: #555; color: white; }
@@ -25,10 +25,7 @@
   <h1>UMI Gripper Data Collection</h1>
   <div class="row">
     <div id="cameraPanels" class="row"></div>
-    <div class="panel">
-      <h2>Trajectory (last 20 poses)</h2>
-      <div id="traj3d"></div>
-    </div>
+    <div id="trajPanels" class="row"></div>
   </div>
   <div class="panel" style="margin-top: 20px;">
     <button id="recordBtn" onclick="startRecord()">● Record</button>
@@ -120,123 +117,150 @@
     }
 
     // -- 3D trajectory view (rviz-like: grid, axes, orbit camera) --------
+    // One of these is created per pose device (pose_names in config), so
+    // multiple UMI grippers each get their own independent 3D trail instead
+    // of only the first configured device ever being visualized.
 
-    const container = document.getElementById('traj3d');
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111111);
+    function createTrajectoryView(container) {
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
 
-    const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.01, 100);
-    camera.up.set(0, 0, 1); // z-up, matches mocap convention
-    camera.position.set(0.6, -0.6, 0.6);
-    camera.lookAt(0, 0, 0);
+      const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.01, 100);
+      camera.up.set(0, 0, 1); // z-up, matches mocap convention
+      camera.position.set(0.6, -0.6, 0.6);
+      camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    container.appendChild(renderer.domElement);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
 
-    scene.add(new THREE.GridHelper(2, 20, 0x444444, 0x333333).rotateX(Math.PI / 2));
-    scene.add(new THREE.AxesHelper(0.3));
+      scene.add(new THREE.GridHelper(2, 20, 0x444444, 0x333333).rotateX(Math.PI / 2));
+      scene.add(new THREE.AxesHelper(0.3));
 
-    const trajGeometry = new THREE.BufferGeometry();
-    const trajMaterial = new THREE.LineBasicMaterial({ color: 0x4caf50 });
-    const trajLine = new THREE.Line(trajGeometry, trajMaterial);
-    scene.add(trajLine);
+      const trajGeometry = new THREE.BufferGeometry();
+      const trajMaterial = new THREE.LineBasicMaterial({ color: 0x4caf50 });
+      const trajLine = new THREE.Line(trajGeometry, trajMaterial);
+      scene.add(trajLine);
 
-    // Small dot at every trajectory sample, so even sub-millimeter motion
-    // (a nearly-stationary gripper) is visible as a cluster, not invisible
-    // next to the larger current-position marker.
-    const MAX_POINT_DOTS = 20;
-    const pointDotGeometry = new THREE.SphereGeometry(0.004, 8, 8);
-    const pointDotMaterial = new THREE.MeshBasicMaterial({ color: 0x81c784 });
-    const pointDots = [];
-    for (let i = 0; i < MAX_POINT_DOTS; i++) {
-      const dot = new THREE.Mesh(pointDotGeometry, pointDotMaterial);
-      dot.visible = false;
-      scene.add(dot);
-      pointDots.push(dot);
-    }
-
-    const currentPosGeometry = new THREE.SphereGeometry(0.012, 16, 16);
-    const currentPosMaterial = new THREE.MeshBasicMaterial({ color: 0xf44336 });
-    const currentPosMarker = new THREE.Mesh(currentPosGeometry, currentPosMaterial);
-    scene.add(currentPosMarker);
-
-    // Orientation gizmo: small XYZ axes attached at the current pose,
-    // rotated by its orientation quaternion (red=X, green=Y, blue=Z).
-    const orientationAxes = new THREE.AxesHelper(0.08);
-    scene.add(orientationAxes);
-
-    // Simple orbit controls (drag to rotate, wheel to zoom) without extra script deps.
-    let isDragging = false, lastX = 0, lastY = 0;
-    let azimuth = Math.PI / 4, elevation = Math.PI / 6, radius = 1.0;
-    const target = new THREE.Vector3(0, 0, 0);
-
-    function updateCameraFromOrbit() {
-      const x = target.x + radius * Math.cos(elevation) * Math.cos(azimuth);
-      const y = target.y + radius * Math.cos(elevation) * Math.sin(azimuth);
-      const z = target.z + radius * Math.sin(elevation);
-      camera.position.set(x, y, z);
-      camera.lookAt(target);
-    }
-    updateCameraFromOrbit();
-
-    renderer.domElement.addEventListener('mousedown', (e) => { isDragging = true; lastX = e.clientX; lastY = e.clientY; });
-    window.addEventListener('mouseup', () => { isDragging = false; });
-    window.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-      const dx = e.clientX - lastX, dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
-      azimuth -= dx * 0.008;
-      elevation = Math.max(-1.4, Math.min(1.4, elevation + dy * 0.008));
-      updateCameraFromOrbit();
-    });
-    renderer.domElement.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      radius = Math.max(0.1, Math.min(5, radius * (1 + e.deltaY * 0.001)));
-      updateCameraFromOrbit();
-    }, { passive: false });
-
-    function updateTrajectory(points) {
-      if (points.length === 0) {
-        trajGeometry.setFromPoints([]);
-        currentPosMarker.visible = false;
-        orientationAxes.visible = false;
-        pointDots.forEach(d => d.visible = false);
-        return;
+      // Small dot at every trajectory sample, so even sub-millimeter motion
+      // (a nearly-stationary gripper) is visible as a cluster, not invisible
+      // next to the larger current-position marker.
+      const MAX_POINT_DOTS = 20;
+      const pointDotGeometry = new THREE.SphereGeometry(0.004, 8, 8);
+      const pointDotMaterial = new THREE.MeshBasicMaterial({ color: 0x81c784 });
+      const pointDots = [];
+      for (let i = 0; i < MAX_POINT_DOTS; i++) {
+        const dot = new THREE.Mesh(pointDotGeometry, pointDotMaterial);
+        dot.visible = false;
+        scene.add(dot);
+        pointDots.push(dot);
       }
-      const vecs = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
-      trajGeometry.setFromPoints(vecs);
 
-      pointDots.forEach((dot, i) => {
-        if (i < vecs.length) {
-          dot.position.copy(vecs[i]);
-          dot.visible = true;
-        } else {
-          dot.visible = false;
-        }
+      const currentPosGeometry = new THREE.SphereGeometry(0.012, 16, 16);
+      const currentPosMaterial = new THREE.MeshBasicMaterial({ color: 0xf44336 });
+      const currentPosMarker = new THREE.Mesh(currentPosGeometry, currentPosMaterial);
+      scene.add(currentPosMarker);
+
+      // Orientation gizmo: small XYZ axes attached at the current pose,
+      // rotated by its orientation quaternion (red=X, green=Y, blue=Z).
+      const orientationAxes = new THREE.AxesHelper(0.08);
+      scene.add(orientationAxes);
+
+      // Simple orbit controls (drag to rotate, wheel to zoom) without extra script deps.
+      let isDragging = false, lastX = 0, lastY = 0;
+      let azimuth = Math.PI / 4, elevation = Math.PI / 6, radius = 1.0;
+      const target = new THREE.Vector3(0, 0, 0);
+
+      function updateCameraFromOrbit() {
+        const x = target.x + radius * Math.cos(elevation) * Math.cos(azimuth);
+        const y = target.y + radius * Math.cos(elevation) * Math.sin(azimuth);
+        const z = target.z + radius * Math.sin(elevation);
+        camera.position.set(x, y, z);
+        camera.lookAt(target);
+      }
+      updateCameraFromOrbit();
+
+      renderer.domElement.addEventListener('mousedown', (e) => { isDragging = true; lastX = e.clientX; lastY = e.clientY; });
+      window.addEventListener('mouseup', () => { isDragging = false; });
+      window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - lastX, dy = e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+        azimuth -= dx * 0.008;
+        elevation = Math.max(-1.4, Math.min(1.4, elevation + dy * 0.008));
+        updateCameraFromOrbit();
       });
+      renderer.domElement.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        radius = Math.max(0.1, Math.min(5, radius * (1 + e.deltaY * 0.001)));
+        updateCameraFromOrbit();
+      }, { passive: false });
 
-      const lastPoint = points[points.length - 1];
-      const lastVec = vecs[vecs.length - 1];
-      currentPosMarker.position.copy(lastVec);
-      currentPosMarker.visible = true;
+      function updateTrajectory(points) {
+        if (!points || points.length === 0) {
+          trajGeometry.setFromPoints([]);
+          currentPosMarker.visible = false;
+          orientationAxes.visible = false;
+          pointDots.forEach(d => d.visible = false);
+          return;
+        }
+        const vecs = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
+        trajGeometry.setFromPoints(vecs);
 
-      orientationAxes.position.copy(lastVec);
-      if (typeof lastPoint.qx === 'number') {
-        orientationAxes.quaternion.set(lastPoint.qx, lastPoint.qy, lastPoint.qz, lastPoint.qw);
+        pointDots.forEach((dot, i) => {
+          if (i < vecs.length) {
+            dot.position.copy(vecs[i]);
+            dot.visible = true;
+          } else {
+            dot.visible = false;
+          }
+        });
+
+        const lastPoint = points[points.length - 1];
+        const lastVec = vecs[vecs.length - 1];
+        currentPosMarker.position.copy(lastVec);
+        currentPosMarker.visible = true;
+
+        orientationAxes.position.copy(lastVec);
+        if (typeof lastPoint.qx === 'number') {
+          orientationAxes.quaternion.set(lastPoint.qx, lastPoint.qy, lastPoint.qz, lastPoint.qw);
+        }
+        orientationAxes.visible = true;
       }
-      orientationAxes.visible = true;
+
+      function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      return { updateTrajectory };
     }
 
-    function animate() {
-      requestAnimationFrame(animate);
-      renderer.render(scene, camera);
+    let trajectoryViews = {};  // { [poseName]: { updateTrajectory } }
+
+    async function loadTrajPanels() {
+      const res = await fetch('/pose_devices');
+      const names = await res.json();
+      const container = document.getElementById('trajPanels');
+      container.innerHTML = names.map(name => `
+        <div class="panel">
+          <h2>${name} (last 20 poses)</h2>
+          <div class="traj3d" id="traj3d-${name}"></div>
+        </div>
+      `).join('');
+      trajectoryViews = {};
+      names.forEach(name => {
+        trajectoryViews[name] = createTrajectoryView(document.getElementById(`traj3d-${name}`));
+      });
     }
-    animate();
 
     async function pollTrajectory() {
       const res = await fetch('/trajectory');
-      updateTrajectory(await res.json());
+      const byName = await res.json();
+      Object.entries(byName).forEach(([name, points]) => {
+        trajectoryViews[name]?.updateTrajectory(points);
+      });
     }
 
     setInterval(pollStatus, 1000);
@@ -244,6 +268,7 @@
     setInterval(pollTorsoPose, 200);
     pollStatus();
     pollConfig().then(loadCameraPanels);
+    loadTrajPanels();
   </script>
 </body>
 </html>

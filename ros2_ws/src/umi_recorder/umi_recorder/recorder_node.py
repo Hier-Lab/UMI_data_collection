@@ -44,7 +44,13 @@ class RecorderNode(Node):
         self.declare_parameter("camera_heights", [480])
         self.declare_parameter("camera_fps", [30])
         self.declare_parameter("camera_max_depth_m", [0.5])
-        self.declare_parameter("pose_topic", "/mocap/umi_gripper/pose")
+        # pose_names/pose_topics are matched by position (same convention as
+        # camera_names/camera_serials) - one entry per tracked UMI device, so
+        # multiple grippers each get their own recorded bag topic, trajectory
+        # buffer, and 3D trail in the UI instead of only the first one
+        # mattering.
+        self.declare_parameter("pose_names", ["umi_gripper"])
+        self.declare_parameter("pose_topics", ["/mocap/umi_gripper/pose"])
         self.declare_parameter("output_dir", str(Path.home() / "umi_episodes"))
         self.declare_parameter("web_host", "0.0.0.0")
         self.declare_parameter("web_port", 8080)
@@ -86,13 +92,23 @@ class RecorderNode(Node):
                     f"(got {len(camera_names)} names, {len(values)} entries in {param_name})."
                 )
 
-        pose_topic = self._pose_topic = self.get_parameter("pose_topic").value
+        pose_names = list(self.get_parameter("pose_names").value)
+        pose_topics = list(self.get_parameter("pose_topics").value)
+        if len(pose_topics) != len(pose_names):
+            raise ValueError(
+                f"pose_names and pose_topics must have the same length "
+                f"(got {len(pose_names)} names, {len(pose_topics)} topics)."
+            )
+        if len(set(pose_names)) != len(pose_names):
+            raise ValueError(f"Duplicate name in pose_names: {pose_names!r}")
+
         output_dir = Path(self.get_parameter("output_dir").value)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         self._bridge = CvBridge()
         self._lock = threading.Lock()
-        self._trajectory: list[dict] = []
+        self._pose_topics: dict[str, str] = dict(zip(pose_names, pose_topics))
+        self._trajectories: dict[str, list[dict]] = {name: [] for name in pose_names}
         self._recording = False
         self._bag = EpisodeBagWriter(output_dir)
         self._current_bag_path: Path | None = None
@@ -168,10 +184,19 @@ class RecorderNode(Node):
                 callback_group=overlay_group,
             )
 
-        pose_group = MutuallyExclusiveCallbackGroup()
-        self.create_subscription(
-            PoseStamped, pose_topic, self._on_pose, qos_profile_sensor_data, callback_group=pose_group
-        )
+        # One MutuallyExclusiveCallbackGroup per device (not one shared group
+        # for all pose subscriptions) so a slow callback for one UMI device
+        # can't delay another's - same independence guarantee as cameras,
+        # just for pose topics instead of frames.
+        for name in pose_names:
+            pose_group = MutuallyExclusiveCallbackGroup()
+            self.create_subscription(
+                PoseStamped,
+                self._pose_topics[name],
+                self._make_pose_callback(name),
+                qos_profile_sensor_data,
+                callback_group=pose_group,
+            )
 
         self._app = self._build_flask_app()
         self._web_thread = threading.Thread(
@@ -194,24 +219,29 @@ class RecorderNode(Node):
 
     # -- ROS callbacks -------------------------------------------------------
 
-    def _on_pose(self, msg: PoseStamped) -> None:
-        point = {
-            "x": msg.pose.position.x,
-            "y": msg.pose.position.y,
-            "z": msg.pose.position.z,
-            "qx": msg.pose.orientation.x,
-            "qy": msg.pose.orientation.y,
-            "qz": msg.pose.orientation.z,
-            "qw": msg.pose.orientation.w,
-        }
-        with self._lock:
-            self._trajectory.append(point)
-            if len(self._trajectory) > MAX_TRAJECTORY_POINTS:
-                self._trajectory.pop(0)
+    def _make_pose_callback(self, name: str):
+        def _on_pose(msg: PoseStamped) -> None:
+            point = {
+                "x": msg.pose.position.x,
+                "y": msg.pose.position.y,
+                "z": msg.pose.position.z,
+                "qx": msg.pose.orientation.x,
+                "qy": msg.pose.orientation.y,
+                "qz": msg.pose.orientation.z,
+                "qw": msg.pose.orientation.w,
+            }
+            with self._lock:
+                trajectory = self._trajectories[name]
+                trajectory.append(point)
+                if len(trajectory) > MAX_TRAJECTORY_POINTS:
+                    trajectory.pop(0)
 
-        if self._recording:
-            self._bag.register_topic(self._pose_topic, "geometry_msgs/msg/PoseStamped")
-            self._bag.write(self._pose_topic, msg, self.get_clock().now().nanoseconds)
+            if self._recording:
+                topic = self._pose_topics[name]
+                self._bag.register_topic(topic, "geometry_msgs/msg/PoseStamped")
+                self._bag.write(topic, msg, self.get_clock().now().nanoseconds)
+
+        return _on_pose
 
     def _on_torso_pose(self, msg: PointStamped) -> None:
         # x/y are normalized image coordinates (0-1) from exo_pose_bridge,
@@ -233,7 +263,8 @@ class RecorderNode(Node):
             return str(self._current_bag_path)
         self._current_bag_path = self._bag.open()
         with self._lock:
-            self._trajectory = []
+            for name in self._trajectories:
+                self._trajectories[name] = []
         self._recording = True
         for camera in self._cameras.values():
             camera.set_recording(True)
@@ -290,10 +321,19 @@ class RecorderNode(Node):
                 mimetype="multipart/x-mixed-replace; boundary=frame",
             )
 
+        @app.route("/pose_devices")
+        def pose_devices():
+            return jsonify(list(self._trajectories.keys()))
+
         @app.route("/trajectory")
         def trajectory():
+            # Keyed by pose device name, e.g. {"umi_gripper": [...]} - one
+            # entry per pose_names configured, each capped at the most
+            # recent MAX_TRAJECTORY_POINTS poses for that device.
             with self._lock:
-                return jsonify(self._trajectory[-MAX_TRAJECTORY_POINTS:])
+                return jsonify(
+                    {name: points[-MAX_TRAJECTORY_POINTS:] for name, points in self._trajectories.items()}
+                )
 
         @app.route("/config")
         def config():
