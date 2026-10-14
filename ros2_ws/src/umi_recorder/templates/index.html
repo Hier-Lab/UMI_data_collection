@@ -18,6 +18,7 @@
     #status { margin-top: 10px; font-family: monospace; }
     .recording #recordBtn { opacity: 0.4; }
     .video-stack { display: flex; flex-direction: column; gap: 12px; }
+    .torsoReadout { font-family: monospace; font-size: 0.8rem; color: #81c784; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -81,12 +82,21 @@
       const container = document.getElementById('cameraPanels');
       container.innerHTML = names.map(name => {
         const maxDepthM = cameraConfig[name]?.max_depth_m;
+        const isExo = cameraConfig[name]?.is_exo;
+        // The exo camera's "color" panel shows exo_pose_bridge's overlay
+        // feed (color frame + detected skeleton already drawn in) instead
+        // of the plain color feed - same image otherwise, so no extra
+        // panel is needed just to see the skeleton.
+        const colorLabel = isExo ? 'Color + pose' : 'Color';
+        const colorSrc = isExo ? '/pose_overlay_feed' : `/video_feed/${name}`;
+        const torsoReadout = isExo ? `<div class="torsoReadout" data-camera="${name}">torso: -</div>` : '';
         return `
         <div class="panel video-stack">
-          <h2>${name}</h2>
+          <h2>${name}${isExo ? ' (exo)' : ''}</h2>
           <div>
-            <h2>Color</h2>
-            <img class="video" src="/video_feed/${name}">
+            <h2>${colorLabel}</h2>
+            <img class="video" src="${colorSrc}">
+            ${torsoReadout}
           </div>
           <div>
             <h2>Depth (0&ndash;<span class="maxDepthLabel" data-camera="${name}">${maxDepthM !== undefined ? maxDepthM.toFixed(2) : '?'}</span> m)</h2>
@@ -95,6 +105,18 @@
         </div>
       `;
       }).join('');
+    }
+
+    async function pollTorsoPose() {
+      const el = document.querySelector('.torsoReadout');
+      if (!el) return;  // no exo camera configured
+      try {
+        const res = await fetch('/torso_pose');
+        const pose = await res.json();
+        el.textContent = pose
+          ? `torso: x=${pose.x.toFixed(3)} y=${pose.y.toFixed(3)} (normalized)`
+          : 'torso: not detected';
+      } catch (e) { /* ignore */ }
     }
 
     // -- 3D trajectory view (rviz-like: grid, axes, orbit camera) --------
@@ -219,6 +241,7 @@
 
     setInterval(pollStatus, 1000);
     setInterval(pollTrajectory, 100);
+    setInterval(pollTorsoPose, 200);
     pollStatus();
     pollConfig().then(loadCameraPanels);
   </script>

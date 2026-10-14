@@ -61,6 +61,28 @@ umi_recorder_node:
     camera_fps: [30]
     camera_max_depth_m: [0.5]   # per camera: depth values beyond this (meters) are clipped when colorizing that camera's depth panel
 
+    # --- Exocentric camera (optional) ---
+    # A single camera facing the human operator (e.g. a D435i), separate
+    # from the camera_* lists above and NOT subject to their 4-camera cap -
+    # it serves a different purpose (tracking human torso motion to map to
+    # linear base motion, via the exo_pose_bridge package/node below) rather
+    # than gripper-mounted RGBD. Leave exo_camera_name empty to disable it.
+    # IMPORTANT: exo_camera_name must also be set (to the same value) in
+    # exo_pose_bridge_node's own section at the bottom of this file - the
+    # two nodes don't share this section automatically.
+    #   exo_camera_name: "exo"
+    #   exo_camera_serial: "247122074186"
+    #   exo_camera_width: 640
+    #   exo_camera_height: 480
+    #   exo_camera_fps: 30
+    #   exo_camera_max_depth_m: 3.0   # a person-facing camera needs much more range than a wrist cam
+    exo_camera_name: "exo"
+    exo_camera_serial: "247122074186"
+    exo_camera_width: 640
+    exo_camera_height: 480
+    exo_camera_fps: 30
+    exo_camera_max_depth_m: 3.0
+
     # --- Input topics ---
     # pose_topic must match "/mocap/<rigid_body_names[i]>/pose" from mocap_bridge_node above.
     # (Each camera's own color/depth topics are derived from camera_names above,
@@ -73,3 +95,11 @@ umi_recorder_node:
     # --- Web UI (Record/Stop, live video + trajectory) ---
     web_host: "0.0.0.0"   # 0.0.0.0 = reachable from other machines on the network
     web_port: 8080
+
+# exo_pose_bridge_node reads only this section (not umi_recorder_node's
+# above) - exo_camera_name here must match umi_recorder_node's exo_camera_name
+# above, since that's how the two nodes agree on the color topic to use
+# (/<exo_camera_name>/color/image_raw/compressed).
+exo_pose_bridge_node:
+  ros__parameters:
+    exo_camera_name: "exo"

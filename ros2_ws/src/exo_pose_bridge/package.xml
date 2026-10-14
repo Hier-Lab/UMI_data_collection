@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>exo_pose_bridge</name>
+  <version>0.1.0</version>
+  <description>Runs MediaPipe Pose on an exocentric camera's live color feed to detect human torso motion, publishing /torso_pose and a skeleton-overlay image for the umi_recorder monitor UI</description>
+  <maintainer email="aho3@ncsu.edu">aho3</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>cv_bridge</depend>
+  <!-- mediapipe pulls in its own numpy and opencv-contrib-python with no
+       version pin, which risks the same ABI conflict open3d had with this
+       ROS 2 Humble environment's pinned numpy (see rgbd_odometry). Unlike
+       rgbd_odometry this runs live, so a per-frame subprocess round-trip
+       is too slow - instead this whole node runs inside a dedicated venv
+       built with --system-site-packages (so it can still see rclpy/
+       cv_bridge/sensor_msgs from the system install) with mediapipe
+       installed on top. Set it up with:
+         virtualenv --system-site-packages <this_package>/.venv
+         <this_package>/.venv/bin/pip install mediapipe
+       Run with: <this_package>/.venv/bin/python3 -m exo_pose_bridge.pose_node -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

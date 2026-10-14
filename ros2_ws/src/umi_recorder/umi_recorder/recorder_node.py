@@ -20,12 +20,12 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from flask import Flask, Response, abort, jsonify, render_template
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 
 from umi_recorder.bag_writer import EpisodeBagWriter
 from umi_recorder.camera_stream import CameraStream
@@ -48,6 +48,17 @@ class RecorderNode(Node):
         self.declare_parameter("output_dir", str(Path.home() / "umi_episodes"))
         self.declare_parameter("web_host", "0.0.0.0")
         self.declare_parameter("web_port", 8080)
+
+        # Exocentric camera (e.g. a D435i facing the human operator) - a
+        # single camera outside the MAX_CAMERAS-capped camera_* lists above,
+        # since it serves a different purpose (torso tracking) and isn't
+        # subject to that cap. Empty name/serial disables it entirely.
+        self.declare_parameter("exo_camera_name", "")
+        self.declare_parameter("exo_camera_serial", "")
+        self.declare_parameter("exo_camera_width", 640)
+        self.declare_parameter("exo_camera_height", 480)
+        self.declare_parameter("exo_camera_fps", 30)
+        self.declare_parameter("exo_camera_max_depth_m", 3.0)
 
         camera_names = list(self.get_parameter("camera_names").value)
         camera_serials = list(self.get_parameter("camera_serials").value)
@@ -105,6 +116,58 @@ class RecorderNode(Node):
         for camera in self._cameras.values():
             camera.start()
 
+        self._exo_camera: CameraStream | None = None
+        self._latest_torso_pose: dict | None = None
+        exo_name = self.get_parameter("exo_camera_name").value
+        if exo_name:
+            if exo_name in self._cameras:
+                raise ValueError(
+                    f"exo_camera_name {exo_name!r} collides with a camera_names entry; "
+                    "pick a different name."
+                )
+            self._exo_camera = CameraStream(
+                name=exo_name,
+                serial=self.get_parameter("exo_camera_serial").value,
+                width=int(self.get_parameter("exo_camera_width").value),
+                height=int(self.get_parameter("exo_camera_height").value),
+                fps=int(self.get_parameter("exo_camera_fps").value),
+                max_depth_m=float(self.get_parameter("exo_camera_max_depth_m").value),
+                bridge=self._bridge,
+                bag=self._bag,
+                logger=self.get_logger(),
+                clock=self.get_clock(),
+                node=self,
+                publish_live=True,  # exo_pose_bridge subscribes to this live, not just while recording
+            )
+            self._cameras[exo_name] = self._exo_camera
+            self._exo_camera.start()
+
+            self._torso_pose_topic = f"/{exo_name}/torso_pose"
+            torso_group = MutuallyExclusiveCallbackGroup()
+            self.create_subscription(
+                PointStamped,
+                self._torso_pose_topic,
+                self._on_torso_pose,
+                qos_profile_sensor_data,
+                callback_group=torso_group,
+            )
+
+            # exo_pose_bridge publishes the color frame with the detected
+            # skeleton drawn on it; shown as its own panel, not recorded
+            # (it's derived/redundant with color + torso_pose, both of
+            # which already are recorded).
+            self._pose_overlay_jpeg: bytes | None = None
+            self._pose_overlay_lock = threading.Lock()
+            self._pose_overlay_ready = threading.Condition(self._pose_overlay_lock)
+            overlay_group = MutuallyExclusiveCallbackGroup()
+            self.create_subscription(
+                CompressedImage,
+                f"/{exo_name}/pose_overlay/image_raw/compressed",
+                self._on_pose_overlay,
+                qos_profile_sensor_data,
+                callback_group=overlay_group,
+            )
+
         pose_group = MutuallyExclusiveCallbackGroup()
         self.create_subscription(
             PoseStamped, pose_topic, self._on_pose, qos_profile_sensor_data, callback_group=pose_group
@@ -149,6 +212,19 @@ class RecorderNode(Node):
         if self._recording:
             self._bag.register_topic(self._pose_topic, "geometry_msgs/msg/PoseStamped")
             self._bag.write(self._pose_topic, msg, self.get_clock().now().nanoseconds)
+
+    def _on_torso_pose(self, msg: PointStamped) -> None:
+        # x/y are normalized image coordinates (0-1) from exo_pose_bridge,
+        # not metric - see exo_pose_bridge's module docstring for why.
+        self._latest_torso_pose = {"x": msg.point.x, "y": msg.point.y}
+        if self._recording:
+            self._bag.register_topic(self._torso_pose_topic, "geometry_msgs/msg/PointStamped")
+            self._bag.write(self._torso_pose_topic, msg, self.get_clock().now().nanoseconds)
+
+    def _on_pose_overlay(self, msg: CompressedImage) -> None:
+        with self._pose_overlay_ready:
+            self._pose_overlay_jpeg = bytes(msg.data)
+            self._pose_overlay_ready.notify_all()
 
     # -- Recording control ---------------------------------------------------
 
@@ -222,7 +298,26 @@ class RecorderNode(Node):
         @app.route("/config")
         def config():
             return jsonify(
-                {name: {"max_depth_m": camera.max_depth_m} for name, camera in self._cameras.items()}
+                {
+                    name: {
+                        "max_depth_m": camera.max_depth_m,
+                        "is_exo": self._exo_camera is not None and camera is self._exo_camera,
+                    }
+                    for name, camera in self._cameras.items()
+                }
+            )
+
+        @app.route("/torso_pose")
+        def torso_pose():
+            return jsonify(self._latest_torso_pose)
+
+        @app.route("/pose_overlay_feed")
+        def pose_overlay_feed():
+            if self._exo_camera is None:
+                abort(404)
+            return Response(
+                self._pose_overlay_mjpeg_generator(),
+                mimetype="multipart/x-mixed-replace; boundary=frame",
             )
 
         @app.route("/status")
@@ -261,6 +356,22 @@ class RecorderNode(Node):
             frame = latest or blank_jpeg
             if frame is last_sent:
                 continue  # timed out with no new frame; avoid resending the same bytes
+            last_sent = frame
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+
+    def _pose_overlay_mjpeg_generator(self):
+        blank = np.zeros((480, 640, 3), dtype=np.uint8)
+        _, blank_jpeg = cv2.imencode(".jpg", blank)
+        blank_jpeg = blank_jpeg.tobytes()
+        last_sent: bytes | None = None
+
+        while rclpy.ok():
+            with self._pose_overlay_ready:
+                self._pose_overlay_ready.wait(timeout=1.0)
+                latest = self._pose_overlay_jpeg
+            frame = latest or blank_jpeg
+            if frame is last_sent:
+                continue
             last_sent = frame
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
 

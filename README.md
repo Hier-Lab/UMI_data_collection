@@ -5,7 +5,8 @@ Records synchronized human demonstrations (hand trajectory + RGB-D video) for tr
 ## Packages
 
 - **`mocap_bridge`** (C++) — publishes `geometry_msgs/PoseStamped` per tracked rigid body from an OptiTrack/Motive NatNet stream.
-- **`umi_recorder`** (Python) — captures up to 4 RealSense cameras directly via `pyrealsense2`, subscribes to mocap poses, and serves a web UI (Record/Stop, live video + depth + 3D trajectory) that writes everything into one ROS 2 bag per episode.
+- **`umi_recorder`** (Python) — captures up to 4 RealSense cameras directly via `pyrealsense2`, subscribes to mocap poses, and serves a web UI (Record/Stop, live video + depth + 3D trajectory) that writes everything into one ROS 2 bag per episode. Optionally also owns one exocentric camera (e.g. a D435i facing the human operator).
+- **`exo_pose_bridge`** (Python) — runs MediaPipe Pose on the exocentric camera's live feed to track human torso motion (for mapping to linear base motion), publishing a normalized torso position and a skeleton-overlay feed shown in the web UI.
 - **`rgbd_odometry`** (Python) — post-process CLI that computes RGBD visual odometry (Open3D) for one camera of a recorded episode and writes it back into that bag as a new topic.
 
 ## Setup
@@ -19,6 +20,15 @@ pip3 install pyrealsense2
 python3 -m pip install --user virtualenv
 virtualenv ros2_ws/src/rgbd_odometry/.venv
 ros2_ws/src/rgbd_odometry/.venv/bin/pip install open3d numpy
+
+# exo_pose_bridge (optional - only needed if you use an exocentric camera)
+# needs mediapipe, which has the same numpy conflict - see docs/architecture.md
+virtualenv --system-site-packages ros2_ws/src/exo_pose_bridge/.venv
+ros2_ws/src/exo_pose_bridge/.venv/bin/pip install mediapipe
+ros2_ws/src/exo_pose_bridge/.venv/bin/pip install --ignore-installed matplotlib
+mkdir -p ros2_ws/src/exo_pose_bridge/models
+curl -fsSL -o ros2_ws/src/exo_pose_bridge/models/pose_landmarker_lite.task \
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
 ```
 
 ## Build

@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .vscode/browse.vc.db*
 .venv/
+ros2_ws/src/exo_pose_bridge/models/*.task

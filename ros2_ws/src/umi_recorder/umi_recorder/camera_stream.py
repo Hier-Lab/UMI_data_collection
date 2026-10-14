@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 import rclpy
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
 
 class CameraStream:
@@ -28,6 +28,8 @@ class CameraStream:
         bag,
         logger,
         clock,
+        node=None,
+        publish_live: bool = False,
     ):
         self.name = name
         self.serial = serial
@@ -45,6 +47,27 @@ class CameraStream:
         self._bag = bag
         self._logger = logger
         self._clock = clock
+
+        # Normally color frames only go out as JPEG (for the MJPEG preview)
+        # and, when recording, into the bag - there's no live ROS topic, to
+        # avoid publishing overhead on cameras nothing subscribes to. A
+        # camera that something needs to subscribe to live (e.g. a pose
+        # estimation node) opts in via publish_live=True.
+        #
+        # Published as CompressedImage (reusing the JPEG already produced
+        # for the MJPEG preview), not raw Image: publishing raw 640x480
+        # bgr8 frames (~0.9MB each) at 30fps through rclpy/DDS measured
+        # only ~3-5fps actually delivered with the subscriber's CPU barely
+        # loaded - the same class of ROS-transport overhead that got
+        # realsense2_camera dropped from this project, just triggered by a
+        # different code path. JPEG cuts message size ~20x and restored a
+        # steady 30fps.
+        self.live_color_topic = f"/{name}/color/image_raw/compressed"
+        self._live_color_pub = None
+        if publish_live:
+            if node is None:
+                raise ValueError("publish_live=True requires a node to create the publisher on")
+            self._live_color_pub = node.create_publisher(CompressedImage, self.live_color_topic, 10)
 
         self._lock = threading.Lock()
         self.color_ready = threading.Condition(self._lock)
@@ -186,10 +209,18 @@ class CameraStream:
 
     def _handle_color(self, color_bgr: np.ndarray, stamp) -> None:
         ok, jpeg = cv2.imencode(".jpg", color_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        if ok:
+        jpeg_bytes = jpeg.tobytes() if ok else None
+        if jpeg_bytes is not None:
             with self.color_ready:
-                self.latest_color_jpeg = jpeg.tobytes()
+                self.latest_color_jpeg = jpeg_bytes
                 self.color_ready.notify_all()
+
+        if self._live_color_pub is not None and jpeg_bytes is not None:
+            live_msg = CompressedImage()
+            live_msg.header.stamp = stamp.to_msg()
+            live_msg.format = "jpeg"
+            live_msg.data = jpeg_bytes
+            self._live_color_pub.publish(live_msg)
 
         if self._recording:
             msg = self._bridge.cv2_to_imgmsg(color_bgr, encoding="bgr8")
