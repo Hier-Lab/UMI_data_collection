@@ -10,8 +10,11 @@ aligned to color; no point cloud is computed or published.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -19,7 +22,7 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from flask import Flask, Response, abort, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -303,22 +306,19 @@ class RecorderNode(Node):
         def cameras():
             return jsonify(list(self._cameras.keys()))
 
-        @app.route("/video_feed/<name>")
-        def video_feed(name):
-            if name not in self._cameras:
-                abort(404)
+        # One Server-Sent Events stream carries every panel's frames, instead
+        # of one MJPEG connection per panel. Browsers cap concurrent HTTP/1.1
+        # connections at ~6 per origin, and each MJPEG response never
+        # completes - with 3 cameras (6 panels) the cap was fully consumed by
+        # video alone, so /trajectory, /pose_devices and /status queued
+        # forever and the UI's pose trails never appeared. This holds one
+        # connection no matter how many cameras are configured.
+        @app.route("/stream")
+        def stream():
             return Response(
-                self._mjpeg_generator(name, "color"),
-                mimetype="multipart/x-mixed-replace; boundary=frame",
-            )
-
-        @app.route("/depth_feed/<name>")
-        def depth_feed(name):
-            if name not in self._cameras:
-                abort(404)
-            return Response(
-                self._mjpeg_generator(name, "depth"),
-                mimetype="multipart/x-mixed-replace; boundary=frame",
+                self._frame_event_generator(),
+                mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
         @app.route("/pose_devices")
@@ -351,15 +351,6 @@ class RecorderNode(Node):
         def torso_pose():
             return jsonify(self._latest_torso_pose)
 
-        @app.route("/pose_overlay_feed")
-        def pose_overlay_feed():
-            if self._exo_camera is None:
-                abort(404)
-            return Response(
-                self._pose_overlay_mjpeg_generator(),
-                mimetype="multipart/x-mixed-replace; boundary=frame",
-            )
-
         @app.route("/status")
         def status():
             return jsonify(
@@ -381,39 +372,33 @@ class RecorderNode(Node):
 
         return app
 
-    def _mjpeg_generator(self, name: str, stream: str):
-        camera = self._cameras[name]
-        blank = np.zeros((480, 640, 3), dtype=np.uint8)
-        _, blank_jpeg = cv2.imencode(".jpg", blank)
-        blank_jpeg = blank_jpeg.tobytes()
-        condition = camera.color_ready if stream == "color" else camera.depth_ready
-        last_sent: bytes | None = None
+    def _frame_event_generator(self, interval_s: float = 1 / 30):
+        """Yield SSE events for every panel whose JPEG changed since the last
+        tick. Each event is {"id": "<camera>:<color|depth>", "jpeg": <base64>};
+        the client assigns it to that panel's img as a data: URL.
+
+        Polls rather than waiting on each camera's condition variable because
+        one generator serves all cameras - the bytes objects are swapped
+        atomically by the capture threads, so an unsynchronized read either
+        sees the previous frame or the next one, never a torn one.
+        """
+        last_sent: dict[str, bytes] = {}
 
         while rclpy.ok():
-            with condition:
-                condition.wait(timeout=1.0)
-                latest = camera.latest_color_jpeg if stream == "color" else camera.latest_depth_jpeg
-            frame = latest or blank_jpeg
-            if frame is last_sent:
-                continue  # timed out with no new frame; avoid resending the same bytes
-            last_sent = frame
-            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-
-    def _pose_overlay_mjpeg_generator(self):
-        blank = np.zeros((480, 640, 3), dtype=np.uint8)
-        _, blank_jpeg = cv2.imencode(".jpg", blank)
-        blank_jpeg = blank_jpeg.tobytes()
-        last_sent: bytes | None = None
-
-        while rclpy.ok():
-            with self._pose_overlay_ready:
-                self._pose_overlay_ready.wait(timeout=1.0)
-                latest = self._pose_overlay_jpeg
-            frame = latest or blank_jpeg
-            if frame is last_sent:
-                continue
-            last_sent = frame
-            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            for name, camera in self._cameras.items():
+                is_exo = self._exo_camera is not None and camera is self._exo_camera
+                # The exo panel shows exo_pose_bridge's skeleton overlay in
+                # place of the plain color frame (same image, annotated).
+                color = self._pose_overlay_jpeg if is_exo else camera.latest_color_jpeg
+                for sid, jpeg in ((f"{name}:color", color), (f"{name}:depth", camera.latest_depth_jpeg)):
+                    if jpeg is None or last_sent.get(sid) is jpeg:
+                        continue
+                    last_sent[sid] = jpeg
+                    payload = json.dumps(
+                        {"id": sid, "jpeg": base64.b64encode(jpeg).decode("ascii")}
+                    )
+                    yield f"data: {payload}\n\n"
+            time.sleep(interval_s)
 
 
 def main(args=None):

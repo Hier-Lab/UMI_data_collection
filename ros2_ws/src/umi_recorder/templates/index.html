@@ -36,6 +36,25 @@
   <script>
     const statusEl = document.getElementById('status');
 
+    // Transparent 1x1 GIF - panels show their black CSS background until the
+    // first frame arrives (an empty src would re-request the page itself).
+    const BLANK_PX = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+    // All camera panels are fed by a single Server-Sent Events connection
+    // (see /stream in recorder_node.py): one long-lived connection total,
+    // rather than one per panel, so the browser's ~6-connection-per-origin
+    // cap stays free for the /trajectory, /status and /torso_pose polls.
+    function startFrameStream() {
+      const source = new EventSource('/stream');
+      source.onmessage = (e) => {
+        const { id, jpeg } = JSON.parse(e.data);
+        const img = document.querySelector(`img.video[data-sid="${id}"]`);
+        if (img) img.src = 'data:image/jpeg;base64,' + jpeg;
+      };
+      // EventSource reconnects on its own; the server resends every panel's
+      // current frame to each new connection, so nothing stays blank.
+    }
+
     async function startRecord() {
       const res = await fetch('/record', { method: 'POST' });
       const data = await res.json();
@@ -85,19 +104,18 @@
         // of the plain color feed - same image otherwise, so no extra
         // panel is needed just to see the skeleton.
         const colorLabel = isExo ? 'Color + pose' : 'Color';
-        const colorSrc = isExo ? '/pose_overlay_feed' : `/video_feed/${name}`;
         const torsoReadout = isExo ? `<div class="torsoReadout" data-camera="${name}">torso: -</div>` : '';
         return `
         <div class="panel video-stack">
           <h2>${name}${isExo ? ' (exo)' : ''}</h2>
           <div>
             <h2>${colorLabel}</h2>
-            <img class="video" src="${colorSrc}">
+            <img class="video" data-sid="${name}:color" src="${BLANK_PX}">
             ${torsoReadout}
           </div>
           <div>
             <h2>Depth (0&ndash;<span class="maxDepthLabel" data-camera="${name}">${maxDepthM !== undefined ? maxDepthM.toFixed(2) : '?'}</span> m)</h2>
-            <img class="video" src="/depth_feed/${name}">
+            <img class="video" data-sid="${name}:depth" src="${BLANK_PX}">
           </div>
         </div>
       `;
@@ -267,7 +285,7 @@
     setInterval(pollTrajectory, 100);
     setInterval(pollTorsoPose, 200);
     pollStatus();
-    pollConfig().then(loadCameraPanels);
+    pollConfig().then(loadCameraPanels).then(startFrameStream);
     loadTrajPanels();
   </script>
 </body>

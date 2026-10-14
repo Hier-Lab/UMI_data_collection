@@ -11,7 +11,7 @@ mocap_bridge_node:
   ros__parameters:
     # --- Mocap (OptiTrack/Motive NatNet) connection ---
     server_address: "10.155.0.195"   # IP of the Windows PC running Motive
-    local_address: "10.152.42.90"    # IP of this Linux PC (use "0.0.0.0" to listen on all interfaces)
+    local_address: "10.154.55.96"    # IP of this Linux PC (use "0.0.0.0" to listen on all interfaces)
     use_multicast: false             # false = unicast, true = multicast (must match Motive's streaming setting)
     command_port: 1510
     data_port: 1511
@@ -21,8 +21,8 @@ mocap_bridge_node:
     # To track more than one object, add entries to both lists, e.g.:
     #   rigid_body_ids: [11, 12]
     #   rigid_body_names: ["UMI_HandRight", "box1"]
-    rigid_body_ids: [11]
-    rigid_body_names: ["UMI_HandRight"]
+    rigid_body_ids: [12, 13]
+    rigid_body_names: ["UMI_right", "UMI_left"]
 
     # --- Publishing behavior ---
     frame_id: "mocap"        # frame_id stamped on published PoseStamped messages
@@ -54,12 +54,19 @@ umi_recorder_node:
     #   camera_heights: [480, 480]
     #   camera_fps: [30, 30]
     #   camera_max_depth_m: [0.5, 2.0]   # D405's usable range is much shorter than D435i's
-    camera_names: ["camera_0"]
-    camera_serials: ["260422272872"]
-    camera_widths: [640]
-    camera_heights: [480]
-    camera_fps: [30]
-    camera_max_depth_m: [0.5]   # per camera: depth values beyond this (meters) are clipped when colorizing that camera's depth panel
+    camera_names: ["right_wrist", "left_wrist", "exo_cam"]
+    camera_serials: ["260422274504", "260422272872", "247122074186"]
+    camera_widths: [640, 640, 640]
+    camera_heights: [480, 480, 480]
+    camera_fps: [30, 30, 30]
+    camera_max_depth_m: [0.5, 0.5, 1.5]   # per camera: depth values beyond this (meters) are clipped when colorizing that camera's depth panel
+
+    # camera_names: ["left_wrist", "right_wrist"]
+    # camera_serials: ["260422274504", "260422272872"]
+    # camera_widths: [640, 640]
+    # camera_heights: [480, 480]
+    # camera_fps: [30, 30]
+    # camera_max_depth_m: [0.5, 0.5] 
 
     # --- Exocentric camera (optional) ---
     # A single camera facing the human operator (e.g. a D435i), separate
@@ -76,12 +83,12 @@ umi_recorder_node:
     #   exo_camera_height: 480
     #   exo_camera_fps: 30
     #   exo_camera_max_depth_m: 3.0   # a person-facing camera needs much more range than a wrist cam
-    exo_camera_name: "exo"
-    exo_camera_serial: "247122074186"
-    exo_camera_width: 640
-    exo_camera_height: 480
-    exo_camera_fps: 30
-    exo_camera_max_depth_m: 3.0
+    # exo_camera_name: "exo"
+    # exo_camera_serial: "247122074186"
+    # exo_camera_width: 640
+    # exo_camera_height: 480
+    # exo_camera_fps: 30
+    # exo_camera_max_depth_m: 3.0
 
     # --- Input topics ---
     # pose_names/pose_topics are matched by position (same convention as
@@ -94,11 +101,11 @@ umi_recorder_node:
     # Two UMI devices example:
     #   pose_names: ["right_hand", "left_hand"]
     #   pose_topics: ["/mocap/UMI_HandRight/pose", "/mocap/UMI_HandLeft/pose"]
-    pose_names: ["umi_gripper"]
-    pose_topics: ["/mocap/UMI_HandRight/pose"]
+    pose_names: ["umi_right", "umi_left"]
+    pose_topics: ["/mocap/UMI_right/pose", "/mocap/UMI_left/pose"]
 
     # --- Output ---
-    output_dir: "/home/hier-tony/umi_episodes"   # where recorded ROS 2 bags (one per episode) are saved
+    output_dir: "/ros2_ws/UMI_data_collection/umi_episodes"   # where recorded ROS 2 bags (one per episode) are saved
 
     # --- Web UI (Record/Stop, live video + trajectory) ---
     web_host: "0.0.0.0"   # 0.0.0.0 = reachable from other machines on the network
